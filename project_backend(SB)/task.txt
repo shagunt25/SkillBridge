@@ -1,0 +1,54 @@
+12/08/26
+
+1. Project Folder & Virtual Environment
+Created the root folder: skillbridge-backend/
+Created a Python virtual environment (venv) inside it — an isolated space so this project's packages don't conflict with other Python projects on your system
+Learned to activate it: venv\Scripts\activate (Windows) — confirmed by seeing (venv) at the start of the terminal prompt
+2.2. Folder Structure
+
+Built the base architecture skeleton:
+
+skillbridge-backend/
+    app/
+        main.py
+        database/
+            __init__.py
+        routes/
+            __init__.py
+        schemas/
+            __init__.py
+        services/
+            __init__.py
+        utils/
+            __init__.py
+        __init__.py
+    venv/
+    each folder has one responsibility: routes/ = API endpoints, schemas/ = Pydantic validation models, services/ = business logic, database/ = MongoDB connection code, utils/ = helper functions.
+4. FastAPI + Uvicorn — First Working Server
+Installed the core packages: pip install fastapi uvicorn
+Generated requirements.txt via pip freeze > requirements.txt so anyone can recreate your environment
+Wrote your first endpoint in app/main.py:
+python
+from fastapi import FastAPI
+
+app = FastAPI(title="SkillBridge AI Backend")
+
+@app.get("/")
+def read_root():
+    return {"message": "SkillBridge AI backend is running"}
+
+    //working of fastapi
+
+    from fastapi import FastAPI
+
+Brings in the FastAPI class — this is the actual web framework engine. Everything else (routes, docs, validation) is built around this class.
+
+python
+from pydantic import BaseModel
+
+Pydantic is FastAPI's data-validation library. BaseModel is the parent class you inherit from to define the "shape" of your data — what fields it has, what types they should be.
+
+python
+from typing import Optional
+
+Optional comes from Python's built-in typing module. Optional[str] just means "either a str, or None." It's used to mark fields that don't have to be provided
