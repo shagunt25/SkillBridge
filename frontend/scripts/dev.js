@@ -1,4 +1,9 @@
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const apiServerPath = fileURLToPath(
+  new URL('../../mock-server/server.js', import.meta.url),
+);
 
 const processes = [];
 
@@ -8,7 +13,7 @@ function start(command, args) {
   return child;
 }
 
-const api = start(process.execPath, ['mock-server/server.js']);
+const api = start(process.execPath, [apiServerPath]);
 const vite = start(process.execPath, ['node_modules/vite/bin/vite.js']);
 
 function stop(exitCode = 0) {
