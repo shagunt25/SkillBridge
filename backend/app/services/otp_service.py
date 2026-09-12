@@ -31,7 +31,6 @@ def create_and_send_otp(email: str) -> dict:
         "created_at": datetime.utcnow()
     })
 
-    # TEMPORARY: no real email service yet, so we print it instead
     print(f"[DEV EMAIL] OTP for {email}: {otp}")
 
     return {"message": "OTP sent to your email."}
@@ -53,7 +52,7 @@ def verify_otp(email: str, submitted_otp: str) -> dict:
 
     if not verify_password(submitted_otp, record["otp_hash"]):
         otp_collection.update_one(
-            {"email": email, "purpose": record["purpose"]},
+            {"email": email, "purpose": "email_verification"},
             {"$set": {"attempts": record["attempts"] + 1}}
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect OTP.")
@@ -67,7 +66,6 @@ def verify_otp(email: str, submitted_otp: str) -> dict:
 
     return {"message": "Email verified successfully."}
 
-import secrets as secrets_module
 
 reset_tokens_collection = db["password_reset_tokens"]
 
@@ -109,16 +107,17 @@ def verify_reset_otp(email: str, submitted_otp: str) -> dict:
     if record["attempts"] >= OTP_MAX_ATTEMPTS:
         otp_collection.delete_one({"email": email, "purpose": "password_reset"})
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Too many incorrect attempts. Please request a new OTP.")
+
     if not verify_password(submitted_otp, record["otp_hash"]):
         otp_collection.update_one(
-            {"email": email, "purpose": record["purpose"]},
+            {"email": email, "purpose": "password_reset"},
             {"$set": {"attempts": record["attempts"] + 1}}
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect OTP.")
 
     otp_collection.delete_one({"email": email, "purpose": "password_reset"})
 
-    reset_token = secrets_module.token_urlsafe(32)
+    reset_token = secrets.token_urlsafe(32)
     reset_tokens_collection.insert_one({
         "reset_token": reset_token,
         "email": email,
