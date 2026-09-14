@@ -3,7 +3,7 @@ from fastapi import HTTPException, status
 from app.database.mongodb import db
 from app.models.user import User
 from app.schemas.auth import SignupRequest
-from app.utils.security import hash_password
+from app.utils.security import hash_password, verify_password, create_access_token
 
 users_collection = db["users"]
 
@@ -30,9 +30,6 @@ def create_user(signup_data: SignupRequest) -> dict:
     return {"message": "Signup successful. Please verify your email.", "email": new_user.email}
 
 
-from app.utils.security import verify_password, create_access_token
-
-
 def authenticate_user(email: str, password: str) -> str:
     user = users_collection.find_one({"email": email})
 
@@ -55,6 +52,8 @@ def authenticate_user(email: str, password: str) -> str:
         )
 
     return create_access_token(user_id=str(user.get("email")))
+
+
 def reset_password(reset_token: str, new_password: str) -> dict:
     from app.services.otp_service import reset_tokens_collection
 
@@ -75,3 +74,5 @@ def reset_password(reset_token: str, new_password: str) -> dict:
     reset_tokens_collection.update_one({"reset_token": reset_token}, {"$set": {"used": True}})
 
     return {"message": "Password reset successful. You can now log in with your new password."}
+
+    
