@@ -7,6 +7,7 @@ FastAPI backend for SkillBridge AI — handles authentication, resume analysis, 
 - FastAPI + Uvicorn
 - MongoDB (via PyMongo)
 - Google Gemini API (resume analysis)
+- PyMuPDF (PDF text extraction)
 - JWT + HttpOnly cookies (authentication)
 
 ## Setup Instructions
@@ -50,6 +51,11 @@ Server runs at http://127.0.0.1:8000
 ### 6. Test the API
 Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) — every endpoint can be tested directly from there.
 
+**Note:** if the file-upload endpoint's browser file picker freezes (a known Chrome/Windows issue), test via `curl` instead:
+```bash
+curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.pdf" -b cookies.txt
+```
+
 ## What's Implemented
 
 ### Authentication (`/api/auth/*`)
@@ -62,11 +68,12 @@ Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) 
 - `POST /api/auth/verify-reset-otp` — verifies OTP, returns short-lived reset token
 - `POST /api/auth/reset-password` — changes password using reset token
 
+
 ### Users (`/api/users/*`)
 - `GET /api/users/me` — returns currently logged-in user (requires valid session cookie)
 
 ### Resume (`/resume/*`)
-- `POST /resume/upload` — upload PDF resume, extracts text, analyzes with Gemini AI, returns structured skills/education/experience/projects
+- `POST /resume/upload` — **requires login**. Accepts a PDF resume, extracts text, sends it to Gemini for analysis, validates the AI response, normalizes skill names, and saves the result to MongoDB linked to the logged-in user. Re-uploading replaces the previous saved analysis (upsert).
 
 ## Important Notes
 
@@ -75,6 +82,9 @@ Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) 
 - **Sessions use HttpOnly cookies** — the frontend does NOT need to manually store or attach any token; the browser handles it automatically as long as requests are made with credentials included
 - **CORS**: currently allows `http://localhost:3000` (configurable via `FRONTEND_URL` in `.env`)
 - **For frontend developers**: when calling these endpoints from React, include `credentials: 'include'` (fetch) or `withCredentials: true` (axios) on every request — otherwise the browser won't send/receive the session cookie, and login will silently fail to persist
+- **Resume uploads require authentication** — the frontend must ensure the user is logged in before showing the upload UI, or handle the resulting 401 gracefully
+- **Gemini API has rate limits** on the free tier — if multiple teammates test simultaneously, you may hit `429` errors; this is expected and not a bug
+
 
 ## Cookie Configuration — Local vs Production
 
@@ -83,7 +93,7 @@ Look closely at these two lines in your `.env` file:
 COOKIE_SECURE=false
 COOKIE_SAMESITE=lax
 ```
-
+ 
 These settings are correct for local development. Browsers will only accept a `SameSite=None` cookie if it's sent over HTTPS (`Secure=True`). Since you're testing locally on plain HTTP (`localhost`), using `lax` and `false` is the only way to make login actually work on your laptop.
 
 **This will break in production.** Because our architecture hosts the React frontend on Vercel and the FastAPI backend on a separate Render domain, the browser will block the auth cookie unless `COOKIE_SAMESITE=none` and `COOKIE_SECURE=true` are configured (via environment variables in each platform's dashboard) once we deploy.
@@ -91,15 +101,14 @@ These settings are correct for local development. Browsers will only accept a `S
 **Do not hardcode these values in the code** — they're already read from `.env` via `os.getenv(...)`, so switching between local and production just means setting different environment variables in each environment, no code changes needed.
 
 ## Folder Structure
-
 ```
 backend/
 app/
 main.py # App entry point, wires all routers
-routes/ # API endpoints
+routes/ # API endpoints (auth, users, resume)
 schemas/ # Request/response validation (Pydantic)
-services/ # Business logic
+services/ # Business logic (auth, otp, gemini, pdf, resume)
 models/ # Database document shapes
 database/ # MongoDB connection
-utils/ # Security helpers (hashing, JWT, auth dependency)
+utils/ # Security, dependencies, normalization helpers
 ```
