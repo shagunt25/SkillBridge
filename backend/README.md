@@ -55,18 +55,28 @@ Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) 
 ### Authentication (`/api/auth/*`)
 - `POST /api/auth/signup` — create account, triggers email OTP
 - `POST /api/auth/verify-email` — verify OTP, activates account
-- `POST /api/auth/resend-verification-otp` — resend OTP
+- `POST /api/auth/resend-verification-otp` — resend OTP (rate-limited — see OTP Rate Limiting section below)
 - `POST /api/auth/login` — returns secure HttpOnly cookie session
 - `POST /api/auth/logout` — clears session
-- `POST /api/auth/forgot-password` — sends password reset OTP
+- `POST /api/auth/forgot-password` — sends password reset OTP (rate-limited — see OTP Rate Limiting section below)
 - `POST /api/auth/verify-reset-otp` — verifies OTP, returns short-lived reset token
-- `POST /api/auth/reset-password` — changes password using reset token
+- `POST /api/auth/reset-password` — changes password using reset token. Invalidates any existing login sessions.
 
 ### Users (`/api/users/*`)
 - `GET /api/users/me` — returns currently logged-in user (requires valid session cookie)
+- `POST /api/users/me/change-password` — **requires login**. Change password while logged in, using your current password (not OTP-based, unlike forgot-password). Requires `old_password` and `new_password` in the body. Invalidates any existing login sessions — you'll need to log in again afterward.
+- `DELETE /api/users/me` — **requires login**. Permanently deletes the logged-in user's account. Note: currently only deletes the user document itself — does not yet clean up associated data in other collections (known limitation, will need addressing once resume/target data collections are merged in).
 
 ### Resume (`/resume/*`)
 - `POST /resume/upload` — upload PDF resume, extracts text, analyzes with Gemini AI, returns structured skills/education/experience/projects
+
+## OTP Rate Limiting
+
+Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-password` enforce a cooldown between consecutive requests, controlled by `OTP_RESEND_COOLDOWN_SECONDS` in `.env` (default: 60 seconds). Requesting a new code before the cooldown expires returns a `429 Too Many Requests` with a message telling the user how many seconds remain.
+
+## Session Invalidation on Password Change
+
+JWTs include an `iat` (issued-at) claim. Whenever a password is changed — via `POST /api/auth/reset-password` (forgot-password flow) or `POST /api/users/me/change-password` (logged-in flow) — the user's `password_changed_at` timestamp is updated in MongoDB. `get_current_user()` compares this against each token's `iat` on every request; any token issued *before* the most recent password change is rejected, forcing re-login. This prevents an old, possibly compromised session from remaining valid after a password change.
 
 ## Important Notes
 
@@ -91,7 +101,6 @@ These settings are correct for local development. Browsers will only accept a `S
 **Do not hardcode these values in the code** — they're already read from `.env` via `os.getenv(...)`, so switching between local and production just means setting different environment variables in each environment, no code changes needed.
 
 ## Folder Structure
-
 ```
 backend/
 app/
