@@ -61,15 +61,17 @@ curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.p
 ### Authentication (`/api/auth/*`)
 - `POST /api/auth/signup` — create account, triggers email OTP
 - `POST /api/auth/verify-email` — verify OTP, activates account
-- `POST /api/auth/resend-verification-otp` — resend OTP
+- `POST /api/auth/resend-verification-otp` — resend OTP (rate-limited — see OTP Rate Limiting section below)
 - `POST /api/auth/login` — returns secure HttpOnly cookie session
 - `POST /api/auth/logout` — clears session
-- `POST /api/auth/forgot-password` — sends password reset OTP
+- `POST /api/auth/forgot-password` — sends password reset OTP (rate-limited — see OTP Rate Limiting section below)
 - `POST /api/auth/verify-reset-otp` — verifies OTP, returns short-lived reset token
-- `POST /api/auth/reset-password` — changes password using reset token
+- `POST /api/auth/reset-password` — changes password using reset token. Invalidates any existing login sessions.
 
 ### Users (`/api/users/*`)
 - `GET /api/users/me` — returns currently logged-in user (requires valid session cookie)
+- `POST /api/users/me/change-password` — **requires login**. Change password while logged in, using your current password (not OTP-based, unlike forgot-password). Requires `old_password` and `new_password` in the body. Invalidates any existing login sessions — you'll need to log in again afterward.
+- `DELETE /api/users/me` — **requires login**. Permanently deletes the logged-in user's account. Note: currently only deletes the user document itself — does not yet clean up associated data in other collections (known limitation, will need addressing once resume/target data collections are merged in).
 
 ### Resume (`/resume/*`)
 - `POST /resume/upload` — **requires login**. Accepts a PDF resume, extracts text, sends it to Gemini for analysis, validates the AI response, normalizes skill names, and saves the result to MongoDB linked to the logged-in user. Re-uploading replaces the previous saved analysis (upsert).
@@ -78,6 +80,14 @@ curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.p
 - `POST /target/career` — **requires login**. Submit a career goal (e.g. "Backend Developer"), Gemini returns the typically required skills for that role, saved to MongoDB
 - `POST /target/job` — **requires login**. Submit a full job description, Gemini extracts the skills mentioned or implied, saved to MongoDB
 - `GET /analysis/skill-gap` — **requires login**. Compares the user's saved resume skills against their saved target skills using plain Python set logic (no AI involved — fast and deterministic). Requires both a resume and a target to already be saved, otherwise returns a 404 with a clear message. Returns matched, missing, and extra skills
+
+## OTP Rate Limiting
+
+Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-password` enforce a cooldown between consecutive requests, controlled by `OTP_RESEND_COOLDOWN_SECONDS` in `.env` (default: 60 seconds). Requesting a new code before the cooldown expires returns a `429 Too Many Requests` with a message telling the user how many seconds remain.
+
+## Session Invalidation on Password Change
+
+JWTs include an `iat` (issued-at) claim. Whenever a password is changed — via `POST /api/auth/reset-password` (forgot-password flow) or `POST /api/users/me/change-password` (logged-in flow) — the user's `password_changed_at` timestamp is updated in MongoDB. `get_current_user()` compares this against each token's `iat` on every request; any token issued *before* the most recent password change is rejected, forcing re-login. This prevents an old, possibly compromised session from remaining valid after a password change.
 
 ## Important Notes
 
@@ -117,4 +127,3 @@ services/ # Business logic (auth, otp, gemini, pdf, resume, target, analysis)
 models/ # Database document shapes
 database/ # MongoDB connection
 utils/ # Security, dependencies, normalization helpers
-```
