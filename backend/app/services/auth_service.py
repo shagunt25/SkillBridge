@@ -69,10 +69,38 @@ def reset_password(reset_token: str, new_password: str) -> dict:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reset token expired. Please start over.")
 
     new_hash = hash_password(new_password)
-    users_collection.update_one({"email": record["email"]}, {"$set": {"password_hash": new_hash}})
+    users_collection.update_one(
+        {"email": record["email"]},
+        {"$set": {"password_hash": new_hash, "password_changed_at": datetime.utcnow()}}
+    )
 
     reset_tokens_collection.update_one({"reset_token": reset_token}, {"$set": {"used": True}})
 
     return {"message": "Password reset successful. You can now log in with your new password."}
 
-    
+
+def change_password(user_email: str, old_password: str, new_password: str) -> dict:
+    user = users_collection.find_one({"email": user_email})
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    if not verify_password(old_password, user["password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect.")
+
+    new_hash = hash_password(new_password)
+    users_collection.update_one(
+        {"email": user_email},
+        {"$set": {"password_hash": new_hash, "password_changed_at": datetime.utcnow()}}
+    )
+
+    return {"message": "Password changed successfully. Please log in again."}
+
+
+def delete_account(user_email: str) -> dict:
+    result = users_collection.delete_one({"email": user_email})
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    return {"message": "Account deleted successfully."}

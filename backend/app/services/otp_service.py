@@ -10,13 +10,28 @@ otp_collection = db["email_otps"]
 
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", 10))
 OTP_MAX_ATTEMPTS = int(os.getenv("OTP_MAX_ATTEMPTS", 5))
+OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", 60))
 
 
 def generate_otp() -> str:
     return f"{secrets.randbelow(1000000):06d}"
 
 
+def _check_cooldown(email: str, purpose: str):
+    existing = otp_collection.find_one({"email": email, "purpose": purpose})
+    if existing:
+        elapsed = (datetime.utcnow() - existing["created_at"]).total_seconds()
+        if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+            wait_time = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {wait_time} seconds before requesting another code."
+            )
+
+
 def create_and_send_otp(email: str) -> dict:
+    _check_cooldown(email, "email_verification")
+
     otp = generate_otp()
     otp_hash = hash_password(otp)
 
@@ -75,6 +90,8 @@ def create_and_send_reset_otp(email: str) -> dict:
     if not user:
         return {"message": "If an account exists, a password reset OTP has been sent."}
 
+    _check_cooldown(email, "password_reset")
+
     otp = generate_otp()
     otp_hash = hash_password(otp)
 
@@ -124,5 +141,7 @@ def verify_reset_otp(email: str, submitted_otp: str) -> dict:
         "expires_at": datetime.utcnow() + timedelta(minutes=10),
         "used": False
     })
+
+
 
     return {"reset_token": reset_token}
