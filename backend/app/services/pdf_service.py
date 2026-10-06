@@ -28,7 +28,7 @@ async def validate_and_read_pdf(file: UploadFile) -> bytes:
 
     return file_bytes
 
-import pymupdf as fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF  # PyMuPDF
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -54,7 +54,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
     return text
 
-import fitz  # PyMuPDF
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
