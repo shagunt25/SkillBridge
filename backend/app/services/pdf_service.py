@@ -1,4 +1,5 @@
 from fastapi import HTTPException, status, UploadFile
+import pymupdf as fitz
 
 MAX_FILE_SIZE_MB = 5
 ALLOWED_CONTENT_TYPE = "application/pdf"
@@ -27,33 +28,6 @@ async def validate_and_read_pdf(file: UploadFile) -> bytes:
         )
 
     return file_bytes
-
-import pymupdf as fitz  # PyMuPDF  # PyMuPDF
-
-
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not open file. Please upload a valid PDF."
-        )
-
-    text = ""
-    for page in doc:
-        text += page.get_text()
-
-    doc.close()
-
-    if not text.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No readable text found in this PDF. It may be a scanned image."
-        )
-
-    return text
-
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
