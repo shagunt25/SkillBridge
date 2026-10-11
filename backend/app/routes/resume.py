@@ -14,19 +14,27 @@ async def upload_resume(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    file_bytes = await validate_and_read_pdf(file)
-    extracted_text = extract_text_from_pdf(file_bytes)
-    raw_analysis = analyze_resume_text(extracted_text)
-    raw_analysis["skills"] = normalize_skills(raw_analysis.get("skills", []))
+    try:
+        file_bytes = await validate_and_read_pdf(file)
+        extracted_text = extract_text_from_pdf(file_bytes)
 
-    validated_analysis = validate_gemini_response(raw_analysis)
+        raw_analysis = analyze_resume_text(extracted_text)
+        raw_analysis["skills"] = normalize_skills(
+            raw_analysis.get("skills", [])
+        )
 
+        validated_analysis = validate_gemini_response(raw_analysis)
 
-    save_resume_analysis(current_user["email"], validated_analysis)
+        save_resume_analysis(
+            current_user["email"],
+            validated_analysis
+        )
 
-    return {
-        "message": "Resume uploaded and analyzed successfully.",
-        "filename": file.filename,
-        "size_kb": round(len(file_bytes) / 1024, 2),
-        "analysis": validated_analysis
-    }
+        return {
+            "message": "Resume uploaded and analyzed successfully.",
+            "filename": file.filename,
+            "size_kb": round(len(file_bytes) / 1024, 2),
+            "analysis": validated_analysis
+        }
+    finally:
+        await file.close()

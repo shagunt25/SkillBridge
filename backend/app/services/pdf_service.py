@@ -1,6 +1,8 @@
 from fastapi import HTTPException, status, UploadFile
+import pymupdf as fitz
 
 MAX_FILE_SIZE_MB = 5
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 ALLOWED_CONTENT_TYPE = "application/pdf"
 
 
@@ -11,16 +13,16 @@ async def validate_and_read_pdf(file: UploadFile) -> bytes:
             detail="Only PDF files are allowed."
         )
 
-    file_bytes = await file.read()
+    # Read at most 1 byte over the limit to avoid loading a huge upload.
+    file_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1)
 
-    size_mb = len(file_bytes) / (1024 * 1024)
-    if size_mb > MAX_FILE_SIZE_MB:
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File too large. Maximum allowed size is {MAX_FILE_SIZE_MB}MB."
         )
 
-    if len(file_bytes) == 0:
+    if not file_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded file is empty."
@@ -28,23 +30,26 @@ async def validate_and_read_pdf(file: UploadFile) -> bytes:
 
     return file_bytes
 
-import pymupdf as fitz # PyMuPDF
-
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+            if doc.is_encrypted or doc.needs_pass:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This PDF is password-protected. Please upload an unencrypted PDF."
+                )
+
+            pages_text = [page.get_text() for page in doc]
+            text = "\n".join(pages_text)
+
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not open file. Please upload a valid PDF."
         )
-
-    text = ""
-    for page in doc:
-        text += page.get_text()
-
-    doc.close()
 
     if not text.strip():
         raise HTTPException(
