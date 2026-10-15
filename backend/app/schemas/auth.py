@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 class SignupRequest(BaseModel):
     name: str = Field(min_length=2, max_length=50)
     email: EmailStr
-    password: str = Field(min_length=8)
+    password: str = Field(min_length=8, max_length=64)
 
     @field_validator("email")
     @classmethod
@@ -81,9 +81,9 @@ class ResetTokenResponse(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     reset_token: str
-    new_password: str = Field(min_length=8)
+    new_password: str = Field(min_length=8, max_length=64)
 
 
 class ChangePasswordRequest(BaseModel):
     old_password: str
-    new_password: str = Field(min_length=8)
+    new_password: str = Field(min_length=8, max_length=64)

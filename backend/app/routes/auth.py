@@ -1,5 +1,7 @@
 import os
 from fastapi import APIRouter, Response
+from fastapi import Depends
+from app.utils.dependencies import get_current_user
 from app.schemas.auth import (
     SignupRequest, SignupResponse,
     VerifyEmailRequest, ResendOtpRequest, MessageResponse,
@@ -47,8 +49,9 @@ def login(payload: LoginRequest, response: Response):
     )
 
     return {"message": "Login successful"}
+
 @router.post("/logout", response_model=MessageResponse)
-def logout(response: Response):
+def logout(response: Response, current_user = Depends(get_current_user)):
     response.delete_cookie(key=COOKIE_NAME)
     return {"message": "Logged out successfully."}
 
