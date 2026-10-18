@@ -14,9 +14,9 @@ def test_password_recovery_journey(client, capfd):
     
     # 0. Setup: Clean state & register a verified user
     db.users.delete_one({"email": test_email})
-    db.otps.delete_many({"email": test_email}) 
+    db.email_otps.delete_many({"email": test_email}) 
 
-    db.password_resets.delete_many({"email": test_email}) if "password_resets" in db.list_collection_names() else None
+    db.password_reset_tokens.delete_many({"email": test_email}) if "password_resets" in db.list_collection_names() else None
     
     client.post("/api/auth/signup", json={"name": "Recovery User", "email": test_email, "password": old_password})
     db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})
