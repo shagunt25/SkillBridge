@@ -1,5 +1,6 @@
 import json
 import pytest
+import httpx
 from unittest.mock import patch
 
 GEMINI_MOCK_PATH = "app.services.gemini_service.generate_resume_content"
@@ -138,4 +139,37 @@ def test_llm_tenacity_retry_exhaustion(mock_client_gen, client, resume_token, ma
     assert response.status_code == 502
     assert mock_client_gen.call_count == 3
 
+
+@patch(CLIENT_MOCK_PATH)
+def test_llm_rate_limit_handling(mock_client_gen, client, resume_token, make_pdf):
+    """Verifies the backend handles 429 Too Many Requests (Quota Exceeded) from Google."""
+    headers = {"Authorization": f"Bearer {resume_token}"}
     
+    class RateLimitError(Exception):
+        code = 429
+
+    mock_client_gen.side_effect = RateLimitError("429 Quota Exceeded")
+    
+    valid_pdf = make_pdf("Shagun Tiwari - Resume Content")
+    files = {"file": ("test_resume.pdf", valid_pdf, "application/pdf")}
+    
+    response = client.post("/api/resume/upload", headers=headers, files=files)
+    
+    # Asserting that your backend catches this and prevents a total crash
+    assert response.status_code in [429, 500, 502, 503]
+
+@patch(CLIENT_MOCK_PATH)
+def test_llm_network_timeout(mock_client_gen, client, resume_token, make_pdf):
+    """Verifies the backend does not hang indefinitely if the LLM API stalls."""
+    headers = {"Authorization": f"Bearer {resume_token}"}
+    
+    mock_client_gen.side_effect = httpx.TimeoutException("Connection timed out")
+    
+    valid_pdf = make_pdf("Shagun Tiwari - Resume Content")
+    files = {"file": ("test_resume.pdf", valid_pdf, "application/pdf")}
+    
+    response = client.post("/api/resume/upload", headers=headers, files=files)
+    
+    assert response.status_code in [500, 502, 504]
+
+ 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Depends
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
 from app.schemas.resume import ResumeUploadResponse
 from app.services.pdf_service import validate_and_read_pdf, extract_text_from_pdf
 from app.services.gemini_service import analyze_resume_text, validate_gemini_response
@@ -25,10 +25,16 @@ async def upload_resume(
 
         validated_analysis = validate_gemini_response(raw_analysis)
 
-        save_resume_analysis(
-            current_user["email"],
-            validated_analysis
-        )
+        try:
+            save_resume_analysis(
+                current_user["email"],
+                validated_analysis
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An internal server error occurred while saving your resume data."
+            )
 
         return {
             "message": "Resume uploaded and analyzed successfully.",
