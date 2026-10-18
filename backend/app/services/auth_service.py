@@ -1,5 +1,8 @@
-from datetime import datetime
+
+from datetime import datetime, timezone
+
 from fastapi import HTTPException, status
+
 from app.database.mongodb import db
 from app.models.user import User
 from app.schemas.auth import SignupRequest
@@ -10,6 +13,7 @@ users_collection = db["users"]
 
 def create_user(signup_data: SignupRequest) -> dict:
     existing_user = users_collection.find_one({"email": signup_data.email})
+
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -27,7 +31,10 @@ def create_user(signup_data: SignupRequest) -> dict:
     user_dict = new_user.model_dump()
     users_collection.insert_one(user_dict)
 
-    return {"message": "Signup successful. Please verify your email.", "email": new_user.email}
+    return {
+        "message": "Signup successful. Please verify your email.",
+        "email": new_user.email
+    }
 
 
 def authenticate_user(email: str, password: str) -> str:
@@ -55,52 +62,95 @@ def authenticate_user(email: str, password: str) -> str:
 
 
 def reset_password(reset_token: str, new_password: str) -> dict:
-    from app.services.otp_service import reset_tokens_collection
+    from app.services.otp_service import reset_tokens_collection, utc_now
 
-    record = reset_tokens_collection.find_one({"reset_token": reset_token})
+    record = reset_tokens_collection.find_one({
+        "reset_token": reset_token
+    })
 
     if not record:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token."
+        )
 
     if record["used"]:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This reset token has already been used.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This reset token has already been used."
+        )
 
-    if datetime.utcnow() > record["expires_at"]:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reset token expired. Please start over.")
+    if utc_now() > record["expires_at"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token expired. Please start over."
+        )
 
     new_hash = hash_password(new_password)
+
+    password_changed_at = datetime.now(timezone.utc).replace(microsecond=0)
+
     users_collection.update_one(
         {"email": record["email"]},
-        {"$set": {"password_hash": new_hash, "password_changed_at": datetime.utcnow()}}
+        {
+            "$set": {
+                "password_hash": new_hash,
+                "password_changed_at": password_changed_at
+            }
+        }
     )
 
-    reset_tokens_collection.update_one({"reset_token": reset_token}, {"$set": {"used": True}})
+    reset_tokens_collection.update_one(
+        {"reset_token": reset_token},
+        {"$set": {"used": True}}
+    )
 
-    return {"message": "Password reset successful. You can now log in with your new password."}
+    return {
+        "message": "Password reset successful. You can now log in with your new password."
+    }
 
 
 def change_password(user_email: str, old_password: str, new_password: str) -> dict:
     user = users_collection.find_one({"email": user_email})
 
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found."
+        )
 
     if not verify_password(old_password, user["password_hash"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect."
+        )
 
     new_hash = hash_password(new_password)
+
+    password_changed_at = datetime.now(timezone.utc).replace(microsecond=0)
+
     users_collection.update_one(
         {"email": user_email},
-        {"$set": {"password_hash": new_hash, "password_changed_at": datetime.utcnow()}}
+        {
+            "$set": {
+                "password_hash": new_hash,
+                "password_changed_at": password_changed_at
+            }
+        }
     )
 
-    return {"message": "Password changed successfully. Please log in again."}
+    return {
+        "message": "Password changed successfully. Please log in again."
+    }
 
 
 def delete_account(user_email: str) -> dict:
     result = users_collection.delete_one({"email": user_email})
 
     if result.deleted_count == 0:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found."
+        )
 
     return {"message": "Account deleted successfully."}

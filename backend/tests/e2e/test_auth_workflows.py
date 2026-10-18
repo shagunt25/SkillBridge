@@ -145,33 +145,85 @@ def test_account_management_and_teardown_journey(client):
     deleted_resumes = db.resumes.find_one({"user_email": test_email})
     assert deleted_resumes is None, "DATA LEAK VULNERABILITY: User's resume data was left behind after account deletion!"
 
-@pytest.mark.skip(reason="Blocked: Awaiting backend lead to fix DB/JWT timestamp precision mismatch")
+
+
 def test_login_immediately_after_password_change(client):
+    """Verify old-session invalidation and immediate re-login."""
     test_email = "jwt_test_user@example.com"
     initial_password = "Password123!"
     new_password = "Password456!"
-    
-    db.users.delete_one({"email": test_email})
-    client.post("/api/auth/signup", json={"name": "JWT User", "email": test_email, "password": initial_password})
-    db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})
-    
-    client.post("/api/auth/login", json={"email": test_email, "password": initial_password})
-    
-    # 1. STRICTLY assert the password change API call actually succeeds
-    change_pw_response = client.post(
-        "/api/users/me/change-password", 
-        json={"old_password": initial_password, "new_password": new_password}
-    )
-    assert change_pw_response.status_code == 200, f"Password change API failed: {change_pw_response.text}"
 
-    # 2. Check the database for the root-cause bug
-    updated_user = db.users.find_one({"email": test_email})
-    changed_at = updated_user.get("password_changed_at")
-    
-    assert changed_at is not None, f"BACKEND BUG: password_changed_at was never saved to the DB! User doc: {updated_user}"
-    assert changed_at.microsecond == 0, f"JWT BUG DETECTED: password_changed_at contains microseconds ({changed_at.microsecond}). This causes random logout loops."
+    # Clear data from previous test runs.
+    db.users.delete_many({"email": test_email})
+    db.email_otps.delete_many({"email": test_email})
 
-    # 3. Verify immediate re-login
-    login_response = client.post("/api/auth/login", json={"email": test_email, "password": new_password})
-    assert login_response.status_code == 200, "Immediate re-login failed even after precision fix!"
+    try:
+        # Register a fresh user.
+        signup_response = client.post(
+            "/api/auth/signup",
+            json={
+                "name": "JWT User",
+                "email": test_email,
+                "password": initial_password,
+            },
+        )
+        assert signup_response.status_code in (200, 201), signup_response.text
 
+        # Mark the user as verified for this test.
+        db.users.update_one(
+            {"email": test_email},
+            {"$set": {"email_verified": True}},
+        )
+
+        # Log in with the original password.
+        login_response = client.post(
+            "/api/auth/login",
+            json={
+                "email": test_email,
+                "password": initial_password,
+            },
+        )
+        assert login_response.status_code == 200, login_response.text
+
+        # Change the password using the authenticated session.
+        change_response = client.post(
+            "/api/users/me/change-password",
+            json={
+                "old_password": initial_password,
+                "new_password": new_password,
+            },
+        )
+        assert change_response.status_code == 200, change_response.text
+
+        # Confirm the previous session is invalidated.
+        old_session_response = client.get("/api/users/me")
+        assert old_session_response.status_code == 401, (
+            "The old session was still accepted after the password change."
+        )
+
+        # Verify the password-change timestamp was saved.
+        user = db.users.find_one({"email": test_email})
+        assert user is not None, "User was not found after password change."
+
+        changed_at = user.get("password_changed_at")
+        assert changed_at is not None, "password_changed_at was not saved."
+        assert changed_at.microsecond == 0, (
+            f"Timestamp contains microseconds: {changed_at.microsecond}"
+        )
+
+        # Re-login immediately with the new password.
+        new_login_response = client.post(
+            "/api/auth/login",
+            json={
+                "email": test_email,
+                "password": new_password,
+            },
+        )
+        assert new_login_response.status_code == 200, (
+            f"Immediate re-login failed: {new_login_response.text}"
+        )
+
+    finally:
+        # Clean up test data even if an assertion fails.
+        db.users.delete_many({"email": test_email})
+        db.email_otps.delete_many({"email": test_email})

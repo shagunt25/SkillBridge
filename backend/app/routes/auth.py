@@ -1,15 +1,31 @@
+
 import os
 from fastapi import APIRouter, Response
-from fastapi import Depends
-from app.utils.dependencies import get_current_user
+
 from app.schemas.auth import (
-    SignupRequest, SignupResponse,
-    VerifyEmailRequest, ResendOtpRequest, MessageResponse,
+    SignupRequest,
+    SignupResponse,
+    VerifyEmailRequest,
+    ResendOtpRequest,
+    MessageResponse,
     LoginRequest,
-    ForgotPasswordRequest, VerifyResetOtpRequest, ResetTokenResponse, ResetPasswordRequest
+    ForgotPasswordRequest,
+    VerifyResetOtpRequest,
+    ResetTokenResponse,
+    ResetPasswordRequest,
 )
-from app.services.auth_service import create_user, authenticate_user, reset_password
-from app.services.otp_service import create_and_send_otp, verify_otp, create_and_send_reset_otp, verify_reset_otp
+from app.services.auth_service import (
+    create_user,
+    authenticate_user,
+    reset_password,
+)
+from app.services.otp_service import (
+    create_and_send_otp,
+    verify_otp,
+    create_and_send_reset_otp,
+    verify_reset_otp,
+)
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = os.getenv("COOKIE_NAME", "skillbridge_auth")
@@ -45,15 +61,22 @@ def login(payload: LoginRequest, response: Response):
         httponly=True,
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
-        max_age=JWT_EXPIRE_MINUTES * 60
+        max_age=JWT_EXPIRE_MINUTES * 60,
     )
 
     return {"message": "Login successful"}
 
+
 @router.post("/logout", response_model=MessageResponse)
-def logout(response: Response, current_user = Depends(get_current_user)):
-    response.delete_cookie(key=COOKIE_NAME)
+def logout(response: Response):
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+    )
     return {"message": "Logged out successfully."}
+
 
 @router.post("/forgot-password", response_model=MessageResponse)
 def forgot_password(payload: ForgotPasswordRequest):
