@@ -67,6 +67,22 @@ def test_password_recovery_journey(client, capfd):
     )
     assert login_response.status_code == 200, "Login with the NEW password failed!"
 
+@pytest.mark.skip(reason="Blocked: Awaiting backend lead to allow unauthenticated requests on /logout to clear dead cookies")
+def test_logout_with_expired_or_invalid_token(client):
+    # 1. Manually inject a fake, invalid, or expired token into the test client's cookies
+    client.cookies.set("access_token", "eyJhbGciOiJIUzI1NiIsInR5cCI.fake.token")
+    
+    # 2. Attempt to log out
+    response = client.post("/api/auth/logout")
+    
+    # 3. The backend should handle this gracefully, returning 200 OK 
+    # and actively commanding the browser to delete the cookie
+    assert response.status_code == 200
+    
+    # 4. Verify the cookie is actually cleared (value is empty or max-age is <= 0)
+    assert "access_token" in response.cookies
+    assert response.cookies["access_token"].value == '""' or response.cookies["access_token"].value == ""
+
 
 def test_account_management_and_teardown_journey(client):
     """
@@ -97,6 +113,7 @@ def test_account_management_and_teardown_journey(client):
     )
     assert change_pw_response.status_code == 200, f"Change password failed: {change_pw_response.text}"
 
+    # TODO: Backend Lead - Remove time.sleep(1) once DB/JWT timestamp precision mismatch is fixed
     time.sleep(1)  # Ensure the backend has time to invalidate the old session cookie
 
     # ---------------------------------------------------------
@@ -127,3 +144,34 @@ def test_account_management_and_teardown_journey(client):
     
     deleted_resumes = db.resumes.find_one({"user_email": test_email})
     assert deleted_resumes is None, "DATA LEAK VULNERABILITY: User's resume data was left behind after account deletion!"
+
+@pytest.mark.skip(reason="Blocked: Awaiting backend lead to fix DB/JWT timestamp precision mismatch")
+def test_login_immediately_after_password_change(client):
+    test_email = "jwt_test_user@example.com"
+    initial_password = "Password123!"
+    new_password = "Password456!"
+    
+    db.users.delete_one({"email": test_email})
+    client.post("/api/auth/signup", json={"name": "JWT User", "email": test_email, "password": initial_password})
+    db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})
+    
+    client.post("/api/auth/login", json={"email": test_email, "password": initial_password})
+    
+    # 1. STRICTLY assert the password change API call actually succeeds
+    change_pw_response = client.post(
+        "/api/users/me/change-password", 
+        json={"old_password": initial_password, "new_password": new_password}
+    )
+    assert change_pw_response.status_code == 200, f"Password change API failed: {change_pw_response.text}"
+
+    # 2. Check the database for the root-cause bug
+    updated_user = db.users.find_one({"email": test_email})
+    changed_at = updated_user.get("password_changed_at")
+    
+    assert changed_at is not None, f"BACKEND BUG: password_changed_at was never saved to the DB! User doc: {updated_user}"
+    assert changed_at.microsecond == 0, f"JWT BUG DETECTED: password_changed_at contains microseconds ({changed_at.microsecond}). This causes random logout loops."
+
+    # 3. Verify immediate re-login
+    login_response = client.post("/api/auth/login", json={"email": test_email, "password": new_password})
+    assert login_response.status_code == 200, "Immediate re-login failed even after precision fix!"
+
