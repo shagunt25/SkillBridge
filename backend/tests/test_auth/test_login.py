@@ -33,10 +33,7 @@ def test_login_unregistered_email(client):
 # 4
 def test_login_wrong_http_method(client):
     """Test that the API rejects incorrect HTTP methods (GET instead of POST)."""
-    # Login strictly requires a POST request
     response = client.get("/api/auth/login") 
-    
-    # FastAPI automatically handles this and returns 405
     assert response.status_code == 405
 
 # 5
@@ -58,8 +55,7 @@ def test_login_email_with_whitespace(client):
         "password": LOGIN_CREDENTIALS["password"]
     }
     response = client.post("/api/auth/login", json=payload)
-    
-    # It should successfully log in (or hit the verification block), but NOT 422 or 404
+
     assert response.status_code in [200, 401, 403]
 
 # 7
@@ -94,6 +90,5 @@ def test_login_nosql_injection(client):
     }
     response = client.post("/api/auth/login", json=payload)
     
-    # FastAPI's Pydantic validation should strictly expect a string and reject the dict
     assert response.status_code == 422
 

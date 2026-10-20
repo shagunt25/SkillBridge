@@ -175,9 +175,7 @@ def test_verify_reset_otp_max_attempts(client, active_user):
 
 # 10. EDGE CASE: Reset Token Expiration
 def test_reset_password_expired_token(client):
-    """Verifies that an expired reset_token is rejected."""
-    # Assuming your backend expects a JWT-style reset token, a manually crafted expired token 
-    # or a mocked time-shift would go here. For now, we test if the backend catches bad/expired signatures.
+    # Verifies that an expired reset_token is rejected.
     payload = {
         "reset_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE1MTYyMzkwMjJ9.expired_signature_mock",
         "new_password": "ValidPassword123!"

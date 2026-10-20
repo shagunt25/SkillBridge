@@ -67,85 +67,25 @@ def test_password_recovery_journey(client, capfd):
     )
     assert login_response.status_code == 200, "Login with the NEW password failed!"
 
-@pytest.mark.skip(reason="Blocked: Awaiting backend lead to allow unauthenticated requests on /logout to clear dead cookies")
+
 def test_logout_with_expired_or_invalid_token(client):
-    # 1. Manually inject a fake, invalid, or expired token into the test client's cookies
-    client.cookies.set("access_token", "eyJhbGciOiJIUzI1NiIsInR5cCI.fake.token")
+    # 1. Manually inject a fake token
+    client.cookies.set("skillbridge_auth", "eyJhbGciOiJIUzI1NiIsInR5cCI.fake.token")
     
     # 2. Attempt to log out
     response = client.post("/api/auth/logout")
     
-    # 3. The backend should handle this gracefully, returning 200 OK 
-    # and actively commanding the browser to delete the cookie
+    # 3. Verify the 401 loop is broken
     assert response.status_code == 200
     
-    # 4. Verify the cookie is actually cleared (value is empty or max-age is <= 0)
-    assert "access_token" in response.cookies
-    assert response.cookies["access_token"].value == '""' or response.cookies["access_token"].value == ""
-
-
-def test_account_management_and_teardown_journey(client):
-    """
-    E2E TEST: Simulates a user changing their password, reading their profile, 
-    and finally deleting their account (ensuring cascade deletion of resume data).
-    """
-    test_email = "teardown_user@example.com"
-    initial_password = "InitialPassword123!"
-    updated_password = "UpdatedPassword456!"
+    # 4. Look directly at the raw headers for the cookie deletion command
+    set_cookie_header = response.headers.get("set-cookie")
     
-    # 0. Setup: Clean state & register a verified user
-    db.users.delete_one({"email": test_email})
-    db.resumes.delete_many({"user_email": test_email})
+    assert set_cookie_header is not None, "BACKEND BUG: The backend returned 200 OK, but forgot to send the delete_cookie command!"
+    assert "skillbridge_auth=" in set_cookie_header
+    assert "Max-Age=0" in set_cookie_header or 'expires=' in set_cookie_header.lower() or '""' in set_cookie_header
+    client.cookies.clear()
     
-    client.post("/api/auth/signup", json={"name": "Teardown User", "email": test_email, "password": initial_password})
-    db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})
-    
-    # 1. Login to establish session
-    client.post("/api/auth/login", json={"email": test_email, "password": initial_password})
-    db.resumes.insert_one({"user_email": test_email, "skills": [{"name": "Python"}]})
-
-    # ---------------------------------------------------------
-    # PHASE A: Change Password
-    # ---------------------------------------------------------
-    change_pw_response = client.post(
-        "/api/users/me/change-password", 
-        json={"old_password": initial_password, "new_password": updated_password}
-    )
-    assert change_pw_response.status_code == 200, f"Change password failed: {change_pw_response.text}"
-
-    # TODO: Backend Lead - Remove time.sleep(1) once DB/JWT timestamp precision mismatch is fixed
-    time.sleep(1)  # Ensure the backend has time to invalidate the old session cookie
-
-    # ---------------------------------------------------------
-    # PHASE A.5: Re-Authenticate
-    # ---------------------------------------------------------
-    # The secure backend invalidated the old cookie. We must log in again.
-    re_login_response = client.post("/api/auth/login", json={"email": test_email, "password": updated_password})
-    assert re_login_response.status_code == 200, "Re-login with updated password failed!"
-
-    # ---------------------------------------------------------
-    # PHASE B: Read Profile
-    # ---------------------------------------------------------
-    profile_response = client.get("/api/users/me")
-    assert profile_response.status_code == 200, f"Read profile failed: {profile_response.text}"
-    assert profile_response.json().get("email") == test_email
-
-    # ---------------------------------------------------------
-    # PHASE C: Account Deletion (Teardown)
-    # ---------------------------------------------------------
-    delete_response = client.delete("/api/users/me")
-    assert delete_response.status_code == 200, f"Account deletion failed: {delete_response.text}"
-
-    # ---------------------------------------------------------
-    # PHASE D: Verify Database Wipe (GDPR / Cascade Delete Check)
-    # ---------------------------------------------------------
-    deleted_user = db.users.find_one({"email": test_email})
-    assert deleted_user is None, "VULNERABILITY: User document was not deleted from MongoDB!"
-    
-    deleted_resumes = db.resumes.find_one({"user_email": test_email})
-    assert deleted_resumes is None, "DATA LEAK VULNERABILITY: User's resume data was left behind after account deletion!"
-
-
 
 def test_login_immediately_after_password_change(client):
     """Verify old-session invalidation and immediate re-login."""
@@ -227,3 +167,65 @@ def test_login_immediately_after_password_change(client):
         # Clean up test data even if an assertion fails.
         db.users.delete_many({"email": test_email})
         db.email_otps.delete_many({"email": test_email})
+
+
+def test_account_management_and_teardown_journey(client):
+    """
+    E2E TEST: Simulates a user changing their password, reading their profile, 
+    and finally deleting their account (ensuring cascade deletion of resume data).
+    """
+    test_email = "teardown_user@example.com"
+    initial_password = "InitialPassword123!"
+    updated_password = "UpdatedPassword456!"
+    
+    # 0. Setup: Clean state & register a verified user
+    db.users.delete_one({"email": test_email})
+    db.resumes.delete_many({"user_email": test_email})
+    
+    client.post("/api/auth/signup", json={"name": "Teardown User", "email": test_email, "password": initial_password})
+    db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})
+    
+    # 1. Login to establish session
+    client.post("/api/auth/login", json={"email": test_email, "password": initial_password})
+    db.resumes.insert_one({"user_email": test_email, "skills": [{"name": "Python"}]})
+
+    # ---------------------------------------------------------
+    # PHASE A: Change Password
+    # ---------------------------------------------------------
+    change_pw_response = client.post(
+        "/api/users/me/change-password", 
+        json={"old_password": initial_password, "new_password": updated_password}
+    )
+    assert change_pw_response.status_code == 200, f"Change password failed: {change_pw_response.text}"
+
+    # TODO: Backend Lead - Remove time.sleep(1) once DB/JWT timestamp precision mismatch is fixed
+    time.sleep(1)  # Ensure the backend has time to invalidate the old session cookie
+
+    # ---------------------------------------------------------
+    # PHASE A.5: Re-Authenticate
+    # ---------------------------------------------------------
+    # The secure backend invalidated the old cookie. We must log in again.
+    re_login_response = client.post("/api/auth/login", json={"email": test_email, "password": updated_password})
+    assert re_login_response.status_code == 200, "Re-login with updated password failed!"
+
+    # ---------------------------------------------------------
+    # PHASE B: Read Profile
+    # ---------------------------------------------------------
+    profile_response = client.get("/api/users/me")
+    assert profile_response.status_code == 200, f"Read profile failed: {profile_response.text}"
+    assert profile_response.json().get("email") == test_email
+
+    # ---------------------------------------------------------
+    # PHASE C: Account Deletion (Teardown)
+    # ---------------------------------------------------------
+    delete_response = client.delete("/api/users/me")
+    assert delete_response.status_code == 200, f"Account deletion failed: {delete_response.text}"
+
+    # ---------------------------------------------------------
+    # PHASE D: Verify Database Wipe (GDPR / Cascade Delete Check)
+    # ---------------------------------------------------------
+    deleted_user = db.users.find_one({"email": test_email})
+    assert deleted_user is None, "VULNERABILITY: User document was not deleted from MongoDB!"
+    
+    deleted_resumes = db.resumes.find_one({"user_email": test_email})
+    assert deleted_resumes is None, "DATA LEAK VULNERABILITY: User's resume data was left behind after account deletion!"

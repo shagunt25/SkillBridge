@@ -107,7 +107,7 @@ def test_change_password_same_as_old(client, active_user):
         "new_password": active_user["password"]
     }
     response = client.post("/api/users/me/change-password", headers=headers, json=payload)
-    # Accepting 400 (strict policy) or 200 (lenient policy) based on backend implementation
+
     assert response.status_code in [400, 422, 200]
 
 def test_change_password_no_token(client):

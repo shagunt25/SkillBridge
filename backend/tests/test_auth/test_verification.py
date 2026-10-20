@@ -2,9 +2,10 @@ import uuid
 import pytest
 from unittest.mock import patch
 from app.database.mongodb import db
+from datetime import datetime, timedelta
+from app.services.otp_service import otp_collection
 
 FIXED_TEST_OTP = "123456"
-# Adjust the path if generate_otp resides directly in otp_service or auth_service
 OTP_GENERATE_PATH = "app.services.otp_service.generate_otp"
 
 
@@ -95,12 +96,6 @@ def test_resend_otp_unregistered_email(client):
     response = client.post("/api/auth/resend-verification-otp", json=payload)
     assert response.status_code == 200
 
-from datetime import datetime, timedelta
-
-from datetime import datetime, timedelta
-# Import the actual collection reference directly from the service
-from app.services.otp_service import otp_collection
-
 
 # 7. EDGE CASE: Expired OTP
 def test_verify_email_expired_otp(client, unverified_user):
@@ -108,7 +103,7 @@ def test_verify_email_expired_otp(client, unverified_user):
     email = unverified_user["email"]
     otp = unverified_user["otp"]
 
-    # Use the exact collection object imported from the service
+
     otp_collection.update_one(
         {"email": email, "purpose": "email_verification"},
         {"$set": {"expires_at": datetime.utcnow() - timedelta(minutes=10)}}

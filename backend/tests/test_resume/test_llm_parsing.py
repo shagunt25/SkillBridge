@@ -155,7 +155,6 @@ def test_llm_rate_limit_handling(mock_client_gen, client, resume_token, make_pdf
     
     response = client.post("/api/resume/upload", headers=headers, files=files)
     
-    # Asserting that your backend catches this and prevents a total crash
     assert response.status_code in [429, 500, 502, 503]
 
 @patch(CLIENT_MOCK_PATH)

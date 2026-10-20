@@ -91,7 +91,7 @@ def test_upload_resume_minimal_text(mock_generate, client, resume_token, make_pd
     files = {"file": ("minimal.pdf", minimal_pdf, "application/pdf")}
     
     response = client.post("/api/resume/upload", headers=headers, files=files)
-    # Locked strictly to your current backend's 400 response
+
     assert response.status_code == 200
 
 @patch(GEMINI_MOCK_PATH)
@@ -172,7 +172,6 @@ def test_upload_resume_database_persistence_strict(mock_generate, client, make_p
         # 5. STRICT SECURITY ASSERTION: Query the database strictly by the authenticated user's email
         saved_resume = db.resumes.find_one({"user_email": strict_test_email})
         
-        # If this is None, your backend failed to link the resume to the user making the request.
         assert saved_resume is not None, "VULNERABILITY: Data was not saved or not linked to the correct user!"
         
         # 6. Verify the payload contents safely
@@ -263,7 +262,6 @@ def test_upload_resume_control_characters(mock_generate, client, make_pdf):
         
         response = client.post("/api/resume/upload", files=files)
         
-        # The backend should cleanly strip or ignore the control characters and process normally
         assert response.status_code == 200
         
     finally:

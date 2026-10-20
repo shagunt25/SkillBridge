@@ -1,6 +1,5 @@
 
 import uuid
-
 import pytest
 from app.database.mongodb import db
 
