@@ -1,5 +1,7 @@
+
 import os
 import jwt
+
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from pwdlib import PasswordHash
@@ -21,12 +23,30 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return password_hasher.verify(plain_password, hashed_password)
 
 
-def create_access_token(user_id: str) -> str:
+def create_access_token(
+    user_id: str,
+    session_version: int = 0,
+) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
-    payload = {"sub": user_id, "iat": now, "exp": expire}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    payload = {
+        "sub": user_id,
+        "iat": now,
+        "exp": expire,
+        "sv": session_version,
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    return jwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+    )

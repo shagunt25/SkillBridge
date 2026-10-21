@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from app.schemas.auth import UserResponse, ChangePasswordRequest, MessageResponse
 from app.services.auth_service import change_password, delete_account
 from app.utils.dependencies import get_current_user
+from app.database.mongodb import db
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -18,4 +19,6 @@ def change_my_password(payload: ChangePasswordRequest, current_user: dict = Depe
 
 @router.delete("/me", response_model=MessageResponse)
 def delete_my_account(current_user: dict = Depends(get_current_user)):
+    db.resumes.delete_many({"user_email": current_user["email"]})
     return delete_account(current_user["email"])
+

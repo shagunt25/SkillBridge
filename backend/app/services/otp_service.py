@@ -1,10 +1,19 @@
+
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
 from fastapi import HTTPException, status
+
 from app.database.mongodb import db
 from app.utils.security import hash_password, verify_password
 from app.services.auth_service import users_collection
+
+
+def utc_now() -> datetime:
+    """Return naive UTC time for compatibility with MongoDB's default datetime handling."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 otp_collection = db["email_otps"]
 
@@ -19,8 +28,10 @@ def generate_otp() -> str:
 
 def _check_cooldown(email: str, purpose: str):
     existing = otp_collection.find_one({"email": email, "purpose": purpose})
+
     if existing:
-        elapsed = (datetime.utcnow() - existing["created_at"]).total_seconds()
+        elapsed = (utc_now() - existing["created_at"]).total_seconds()
+
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             wait_time = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
             raise HTTPException(
@@ -35,15 +46,18 @@ def create_and_send_otp(email: str) -> dict:
     otp = generate_otp()
     otp_hash = hash_password(otp)
 
-    otp_collection.delete_one({"email": email, "purpose": "email_verification"})
+    otp_collection.delete_one({
+        "email": email,
+        "purpose": "email_verification"
+    })
 
     otp_collection.insert_one({
         "email": email,
         "otp_hash": otp_hash,
         "purpose": "email_verification",
-        "expires_at": datetime.utcnow() + timedelta(minutes=OTP_EXPIRE_MINUTES),
+        "expires_at": utc_now() + timedelta(minutes=OTP_EXPIRE_MINUTES),
         "attempts": 0,
-        "created_at": datetime.utcnow()
+        "created_at": utc_now()
     })
 
     print(f"[DEV EMAIL] OTP for {email}: {otp}")
@@ -52,90 +66,155 @@ def create_and_send_otp(email: str) -> dict:
 
 
 def verify_otp(email: str, submitted_otp: str) -> dict:
-    record = otp_collection.find_one({"email": email, "purpose": "email_verification"})
+    record = otp_collection.find_one({
+        "email": email,
+        "purpose": "email_verification"
+    })
 
     if not record:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No OTP found. Please request a new one.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No OTP found. Please request a new one."
+        )
 
-    if datetime.utcnow() > record["expires_at"]:
-        otp_collection.delete_one({"email": email, "purpose": "email_verification"})
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP expired. Please request a new one.")
+    if utc_now() > record["expires_at"]:
+        otp_collection.delete_one({
+            "email": email,
+            "purpose": "email_verification"
+        })
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP expired. Please request a new one."
+        )
 
     if record["attempts"] >= OTP_MAX_ATTEMPTS:
-        otp_collection.delete_one({"email": email, "purpose": "email_verification"})
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Too many incorrect attempts. Please request a new OTP.")
+        otp_collection.delete_one({
+            "email": email,
+            "purpose": "email_verification"
+        })
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Too many incorrect attempts. Please request a new OTP."
+        )
 
     if not verify_password(submitted_otp, record["otp_hash"]):
         otp_collection.update_one(
             {"email": email, "purpose": "email_verification"},
             {"$set": {"attempts": record["attempts"] + 1}}
         )
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect OTP.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect OTP."
+        )
 
     user = users_collection.find_one({"email": email})
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
-    users_collection.update_one({"email": email}, {"$set": {"email_verified": True}})
-    otp_collection.delete_one({"email": email, "purpose": "email_verification"})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found."
+        )
+
+    users_collection.update_one(
+        {"email": email},
+        {"$set": {"email_verified": True}}
+    )
+
+    otp_collection.delete_one({
+        "email": email,
+        "purpose": "email_verification"
+    })
 
     return {"message": "Email verified successfully."}
 
 
 def create_and_send_reset_otp(email: str) -> dict:
     user = users_collection.find_one({"email": email})
+
     if not user:
-        return {"message": "If an account exists, a password reset OTP has been sent."}
+        return {
+            "message": "If an account exists, a password reset OTP has been sent."
+        }
 
     _check_cooldown(email, "password_reset")
 
     otp = generate_otp()
     otp_hash = hash_password(otp)
 
-    otp_collection.delete_one({"email": email, "purpose": "password_reset"})
+    otp_collection.delete_one({
+        "email": email,
+        "purpose": "password_reset"
+    })
 
     otp_collection.insert_one({
         "email": email,
         "otp_hash": otp_hash,
         "purpose": "password_reset",
-        "expires_at": datetime.utcnow() + timedelta(minutes=OTP_EXPIRE_MINUTES),
+        "expires_at": utc_now() + timedelta(minutes=OTP_EXPIRE_MINUTES),
         "attempts": 0,
-        "created_at": datetime.utcnow()
+        "created_at": utc_now()
     })
 
     print(f"[DEV EMAIL] Password reset OTP for {email}: {otp}")
 
-    return {"message": "If an account exists, a password reset OTP has been sent."}
+    return {
+        "message": "If an account exists, a password reset OTP has been sent."
+    }
 
 
 def verify_reset_otp(email: str, submitted_otp: str) -> dict:
-    record = otp_collection.find_one({"email": email, "purpose": "password_reset"})
+    record = otp_collection.find_one({
+        "email": email,
+        "purpose": "password_reset"
+    })
 
     if not record:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No OTP found. Please request a new one.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No OTP found. Please request a new one."
+        )
 
-    if datetime.utcnow() > record["expires_at"]:
-        otp_collection.delete_one({"email": email, "purpose": "password_reset"})
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP expired. Please request a new one.")
+    if utc_now() > record["expires_at"]:
+        otp_collection.delete_one({
+            "email": email,
+            "purpose": "password_reset"
+        })
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP expired. Please request a new one."
+        )
 
     if record["attempts"] >= OTP_MAX_ATTEMPTS:
-        otp_collection.delete_one({"email": email, "purpose": "password_reset"})
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Too many incorrect attempts. Please request a new OTP.")
+        otp_collection.delete_one({
+            "email": email,
+            "purpose": "password_reset"
+        })
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Too many incorrect attempts. Please request a new OTP."
+        )
 
     if not verify_password(submitted_otp, record["otp_hash"]):
         otp_collection.update_one(
             {"email": email, "purpose": "password_reset"},
             {"$set": {"attempts": record["attempts"] + 1}}
         )
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect OTP.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect OTP."
+        )
 
-    otp_collection.delete_one({"email": email, "purpose": "password_reset"})
+    otp_collection.delete_one({
+        "email": email,
+        "purpose": "password_reset"
+    })
 
     reset_token = secrets.token_urlsafe(32)
+
     reset_tokens_collection.insert_one({
         "reset_token": reset_token,
         "email": email,
-        "expires_at": datetime.utcnow() + timedelta(minutes=10),
+        "expires_at": utc_now() + timedelta(minutes=10),
         "used": False
     })
 

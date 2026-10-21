@@ -32,6 +32,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+*:Zone.Identifier
+
 
 # Virtual Environments
 venv/

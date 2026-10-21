@@ -1,19 +1,27 @@
+
+
 import os
-from datetime import datetime, timezone
+
 from fastapi import Cookie, HTTPException, status
+
 from app.utils.security import decode_access_token
 from app.services.auth_service import users_collection
 
 COOKIE_NAME = os.getenv("COOKIE_NAME", "skillbridge_auth")
 
 
-def get_current_user(skillbridge_auth: str | None = Cookie(default=None, alias=None)):
+def get_current_user(
+    skillbridge_auth: str | None = Cookie(
+        default=None,
+        alias=COOKIE_NAME,
+    ),
+):
     token = skillbridge_auth
 
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated."
+            detail="Not authenticated.",
         )
 
     try:
@@ -21,31 +29,43 @@ def get_current_user(skillbridge_auth: str | None = Cookie(default=None, alias=N
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired session. Please log in again."
+            detail="Invalid or expired session. Please log in again.",
         )
 
     email = payload.get("sub")
+
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session.",
+        )
+
     user = users_collection.find_one({"email": email})
 
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found."
+            detail="User not found.",
         )
 
-    password_changed_at = user.get("password_changed_at")
-    token_issued_at = payload.get("iat")
+    # Tokens issued before session-version support default to version 0.
+    token_version = payload.get("sv", 0)
+    current_version = user.get("session_version", 0)
 
-    if password_changed_at and token_issued_at:
-        if isinstance(token_issued_at, (int, float)):
-            token_issued_dt = datetime.fromtimestamp(token_issued_at, tz=timezone.utc)
-        else:
-            token_issued_dt = token_issued_at
-
-        if password_changed_at.replace(tzinfo=timezone.utc) > token_issued_dt:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Session expired due to password change. Please log in again."
-            )
+    # Reject tokens issued before a password change or reset.
+    if (
+        not isinstance(token_version, int)
+        or isinstance(token_version, bool)
+        or not isinstance(current_version, int)
+        or isinstance(current_version, bool)
+        or token_version != current_version
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Session expired due to password change. "
+                "Please log in again."
+            ),
+        )
 
     return user
