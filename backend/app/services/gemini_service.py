@@ -44,18 +44,16 @@ You are a career learning advisor. Rank missing skills for the target role.
 Consider foundational importance, dependencies, and common job requirements.
 
 Return only valid JSON in this format:
-{
+{{
   "prioritized_skills": [
-    {"skill": "Python", "priority": "High"}
+    {{"skill": "Python", "priority": "High"}}
   ]
-}
+}}
 
 Priority must be exactly High, Medium, or Low.
 Target role: {target_role}
 Missing skills: {missing_skills}
 """
-
-
 def is_retryable_gemini_error(exc: Exception) -> bool:
     """Retry only errors that are likely to be temporary."""
     code = getattr(exc, "code", None)
