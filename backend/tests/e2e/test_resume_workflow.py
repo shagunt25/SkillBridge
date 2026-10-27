@@ -1,7 +1,7 @@
 import pytest
 import json
 from app.database.mongodb import db
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 GEMINI_MOCK_PATH = "app.services.gemini_service.generate_resume_content"
 VALID_MOCK_AI_JSON = json.dumps({
@@ -74,3 +74,47 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
     
     skill_names = [s["name"].lower() for s in saved_resume["skills"]]
     assert "python" in skill_names
+
+    # ---------------------------------------------------------
+    # PHASE E: Target Skills (AI Inference)
+    # ---------------------------------------------------------
+    mock_target_ai = MagicMock()
+    mock_target_ai.text = '{"target_role": "Backend Engineer", "required_skills": ["python", "docker", "kubernetes", "aws"]}'
+    
+    # Intercept the specific AI call made by the target_service
+    with patch("app.services.target_service.client.models.generate_content", return_value=mock_target_ai):
+        target_response = client.post("/target/career", json={"target_role": "Backend Engineer"})
+        
+    assert target_response.status_code == 200, f"Target Failed: {target_response.text}"
+    
+    saved_target = db.targets.find_one({"user_email": test_email})
+    assert saved_target is not None, "Target was not linked to the user in MongoDB!"
+    assert "kubernetes" in saved_target["required_skills"]
+
+    # ---------------------------------------------------------
+    # PHASE F: Skill-Gap Engine (Deterministic Analysis)
+    # ---------------------------------------------------------
+    # No AI mock needed here; this relies purely on the database state
+    gap_response = client.get("/analysis/skill-gap")
+    
+    assert gap_response.status_code == 200, f"Gap Engine Failed: {gap_response.text}"
+    gap_data = gap_response.json()
+    assert gap_data["target_role"] == "Backend Engineer"
+    assert gap_data["matched_skills"] == ["docker", "python"]
+    assert gap_data["missing_skills"] == ["aws", "kubernetes"]
+
+    # ---------------------------------------------------------
+    # PHASE G: AI Skill Prioritization (The Final Step)
+    # ---------------------------------------------------------
+    mock_prioritization_ai = MagicMock()
+    mock_prioritization_ai.text = '{"target_role": "backend engineer", "prioritized_skills": [{"skill": "kubernetes", "priority": "High"}, {"skill": "aws", "priority": "Medium"}]}'
+    
+    # Intercept the specific AI call made by the gemini_service for prioritization
+    with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_prioritization_ai):
+        prioritization_response = client.get("/analysis/prioritized-skills")
+        
+    assert prioritization_response.status_code == 200, f"Prioritization E2E Failed: {prioritization_response.text}"
+    
+    prioritization_data = prioritization_response.json()
+    assert prioritization_data["prioritized_skills"][0]["skill"] == "kubernetes"
+    assert prioritization_data["prioritized_skills"][0]["priority"] == "High"
