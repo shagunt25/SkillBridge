@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import auth, users, resume, target, analysis
+from app.routes import auth, users, resume, target, analysis, prioritization
 
 app = FastAPI(title="SkillBridge AI Backend")
 
@@ -8,6 +8,8 @@ app.include_router(users.router)
 app.include_router(resume.router)
 app.include_router(target.router)
 app.include_router(analysis.router)
+app.include_router(prioritization.router)
+
 
 @app.get("/")
 def read_root():
