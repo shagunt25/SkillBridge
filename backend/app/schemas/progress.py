@@ -1,19 +1,26 @@
-from pydantic import BaseModel, Field
 from typing import List
+
+from pydantic import BaseModel, Field
+
+from app.schemas.roadmap import RoadmapItem
 
 
 class UpdateProgressRequest(BaseModel):
     skill: str
-    status: str = Field(pattern="^(Not Started|In Progress|Completed)$")
+    status: str = Field(
+        pattern="^(Not Started|In Progress|Completed)$"
+    )
 
 
-class RoadmapItemWithProgress(BaseModel):
+class UpdateSubtopicProgressRequest(BaseModel):
     skill: str
-    priority: str
-    status: str
+    subtopic: str
+    status: str = Field(
+        pattern="^(Not Started|In Progress|Completed)$"
+    )
 
 
 class ProgressResponse(BaseModel):
     target_role: str
-    roadmap: List[RoadmapItemWithProgress]
+    roadmap: List[RoadmapItem]
     overall_progress: float

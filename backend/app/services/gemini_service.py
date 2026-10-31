@@ -180,6 +180,10 @@ def prioritize_missing_skills(
         )
         raw_text = (response.text or "").strip()
     except Exception as e:
+        print(
+            f"Gemini prioritization failed: "
+            f"{type(e).__name__}: {e}"
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to get prioritization from Gemini.",
@@ -241,3 +245,146 @@ def prioritize_missing_skills(
         "target_role": target_role,
         "prioritized_skills": normalized,
     }
+def prioritize_missing_skills(
+    target_role: str,
+    missing_skills: list[str],
+) -> dict:
+    if not missing_skills:
+        return {
+            "target_role": target_role,
+            "prioritized_skills": [],
+        }
+
+    def fallback_priority(skill: str) -> str:
+        name = skill.strip().casefold()
+
+        # Core foundations commonly needed for frontend roles.
+        high_priority = {
+            "html",
+            "css",
+            "javascript",
+            "react",
+            "python",
+            "sql",
+            "git",
+            "rest apis",
+        }
+
+        if name in high_priority:
+            return "High"
+
+        medium_priority = {
+            "typescript",
+            "responsive design",
+            "ui/ux principles",
+            "web performance optimization",
+        }
+
+        if name in medium_priority:
+            return "Medium"
+
+        return "Low"
+
+    if client is None:
+        return {
+            "target_role": target_role,
+            "prioritized_skills": [
+                {
+                    "skill": skill,
+                    "priority": fallback_priority(skill),
+                }
+                for skill in missing_skills
+            ],
+        }
+
+    prompt = f"""
+You are a practical technical career mentor.
+
+Target role: {target_role}
+
+Missing skills:
+{json.dumps(missing_skills)}
+
+Assign each skill exactly one priority:
+- High: foundational or essential for entering this role.
+- Medium: important, but can follow the foundations.
+- Low: supplementary or more advanced.
+
+Rules:
+1. Include every supplied skill exactly once.
+2. Do not invent additional skills.
+3. Do not give every skill the same priority unless genuinely justified.
+4. Use only High, Medium, or Low.
+5. Return valid JSON only, in this format:
+{{
+  "prioritized_skills": [
+    {{"skill": "skill name", "priority": "High"}}
+  ]
+}}
+"""
+
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+        )
+
+        raw_text = (response.text or "").strip()
+        raw_text = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            raw_text,
+            flags=re.IGNORECASE,
+        )
+
+        parsed = json.loads(raw_text)
+        returned = parsed.get("prioritized_skills", [])
+
+        priority_map = {}
+
+        for item in returned:
+            if not isinstance(item, dict):
+                continue
+
+            skill_name = item.get("skill")
+            priority = item.get("priority")
+
+            if (
+                isinstance(skill_name, str)
+                and priority in {"High", "Medium", "Low"}
+            ):
+                priority_map[skill_name.strip().casefold()] = priority
+
+        prioritized_skills = [
+            {
+                "skill": skill,
+                "priority": priority_map.get(
+                    skill.strip().casefold(),
+                    fallback_priority(skill),
+                ),
+            }
+            for skill in missing_skills
+        ]
+
+        return {
+            "target_role": target_role,
+            "prioritized_skills": prioritized_skills,
+        }
+
+    except Exception as exc:
+        print(
+            "Gemini prioritization failed:",
+            type(exc).__name__,
+            str(exc),
+        )
+
+        return {
+            "target_role": target_role,
+            "prioritized_skills": [
+                {
+                    "skill": skill,
+                    "priority": fallback_priority(skill),
+                }
+                for skill in missing_skills
+            ],
+        }
