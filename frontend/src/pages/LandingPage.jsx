@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
   Sparkles,
@@ -31,23 +31,23 @@ const FEATURE_PILLS = [
 const HERO_CARDS = [
   {
     icon: User,
-    title: 'Personalized Roadmaps',
-    link: '/onboarding/skills',
+    title: 'Personalized Roadmap',
+    link: '/dashboard',
   },
   {
     icon: BarChart3,
     title: 'Skill Gap Analysis',
-    link: '/onboarding/skills',
+    link: '/onboarding/target',
   },
   {
     icon: TrendingUp,
     title: 'Progress Tracking',
-    link: '/onboarding/skills',
+    link: '/dashboard',
   },
   {
     icon: Cpu,
     title: 'AI-Powered Insights',
-    link: '/onboarding/skills',
+    link: '/roadmap/review',
   },
 ];
 
@@ -85,12 +85,25 @@ const WORKFLOW_STEPS = [
 ];
 
 export default function LandingPage() {
+  const navigate = useNavigate();
   const { state, dispatch } = useAppContext();
   const [isCtaHovered, setIsCtaHovered] = useState(false);
 
   const toggleTheme = () => {
     const nextTheme = state.theme === 'dark' ? 'light' : 'dark';
     dispatch({ type: ACTIONS.SET_THEME, payload: nextTheme });
+  };
+
+  const handleFeatureClick = (e, targetPath) => {
+    e.preventDefault();
+    if (state.isAuthenticated) {
+      navigate(targetPath);
+    } else {
+      try {
+        sessionStorage.setItem('skillbridge_auth_destination', targetPath);
+      } catch {}
+      navigate('/signup', { state: { from: targetPath } });
+    }
   };
 
   return (
@@ -226,7 +239,9 @@ export default function LandingPage() {
             const Icon = card.icon;
             return (
               <Link
-                to={card.link}
+                to={state.isAuthenticated ? card.link : '/signup'}
+                state={!state.isAuthenticated ? { from: card.link } : undefined}
+                onClick={(e) => handleFeatureClick(e, card.link)}
                 key={i}
                 className="bg-surface/80 dark:bg-surface/40 backdrop-blur-sm border border-border/80 rounded-2xl p-4 sm:p-5 hover:border-accent/50 transition-all flex items-center justify-between group shadow-xs hover:shadow-sm"
               >

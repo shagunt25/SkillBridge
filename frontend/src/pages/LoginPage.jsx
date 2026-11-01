@@ -15,13 +15,22 @@ export default function LoginPage() {
   const location = useLocation();
   const { state, dispatch } = useAppContext();
   const [showPw, setShowPw] = useState(false);
-  const [form, setForm] = useState({ email: '', password: '' });
+  const [form, setForm] = useState({
+    email: location.state?.email || '',
+    password: '',
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [successNotice, setSuccessNotice] = useState(
+    location.state?.verified
+      ? 'Email verified successfully! Please sign in to continue to your selected feature.'
+      : ''
+  );
 
   const handleInput = (e) => {
     setForm((p) => ({ ...p, [e.target.name]: e.target.value }));
     if (error) setError('');
+    if (successNotice) setSuccessNotice('');
   };
 
   const handleSubmit = (e) => {
@@ -44,8 +53,23 @@ export default function LoginPage() {
         },
       });
       setIsLoading(false);
-      const destination = location.state?.from?.pathname || '/onboarding/skills';
-      navigate(destination, { replace: true });
+
+      const targetFrom = location.state?.from;
+      let destination = typeof targetFrom === 'string'
+        ? targetFrom
+        : targetFrom?.pathname;
+
+      if (!destination) {
+        try {
+          destination = sessionStorage.getItem('skillbridge_auth_destination');
+        } catch {}
+      }
+
+      try {
+        sessionStorage.removeItem('skillbridge_auth_destination');
+      } catch {}
+
+      navigate(destination || '/onboarding/skills', { replace: true });
     }, 300);
   };
 
@@ -144,11 +168,19 @@ export default function LoginPage() {
             </button>
             <Link
               to="/signup"
+              state={location.state}
               className="pb-3 px-4 font-medium text-sm text-text-secondary hover:text-text-primary transition-colors"
             >
               Sign up
             </Link>
           </div>
+
+          {successNotice && (
+            <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-xs flex items-center gap-2">
+              <CheckCircle2 size={16} className="flex-shrink-0" />
+              <span>{successNotice}</span>
+            </div>
+          )}
 
           {error && (
             <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-danger text-xs">
@@ -218,48 +250,9 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Divider */}
-          <div className="relative my-6 text-center">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
-            </div>
-            <span className="relative bg-background px-3 text-[11px] text-text-secondary uppercase">
-              or
-            </span>
-          </div>
-
-          {/* Social login */}
-          <button
-            type="button"
-            onClick={() => {
-              setForm({ email: 'alex@example.com', password: 'password123' });
-            }}
-            className="w-full btn-outline py-2.5 flex items-center justify-center gap-2 text-xs"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 24 24">
-              <path
-                fill="#4285F4"
-                d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-              />
-              <path
-                fill="#34A853"
-                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.26v3.15C3.26 21.36 7.33 24 12 24z"
-              />
-              <path
-                fill="#FBBC05"
-                d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.26C.46 8.16 0 9.94 0 12s.46 3.84 1.26 5.42l4.02-3.15z"
-              />
-              <path
-                fill="#EA4335"
-                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.26 6.58l4.02 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-              />
-            </svg>
-            <span>Continue with Google</span>
-          </button>
-
           <p className="text-center text-xs text-text-secondary mt-8">
             Don't have an account?{' '}
-            <Link to="/signup" className="text-accent font-medium hover:underline">
+            <Link to="/signup" state={location.state} className="text-accent font-medium hover:underline">
               Create account
             </Link>
           </p>
