@@ -179,6 +179,6 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
     # Matches the math calculated in Phase I
     assert dashboard_data["overall_progress"] == progress_data["overall_progress"]
     
-    # E2E test user's resume had "Python" and "Docker" (from Phase C)
+    # E2E test user's resume had "Python" and "Docker" 
     assert dashboard_data["current_skills"] == ["python", "docker"]
 
