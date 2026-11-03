@@ -1,646 +1,535 @@
 import json
 import os
 import re
+
 from urllib.parse import urlparse
 
 import httpx
+
 from fastapi import HTTPException, status
 
 from app.database.mongodb import db
 from app.services.gemini_service import client, MODEL_NAME
 
 
-roadmaps_collection = db["roadmaps"]
-
-TAVILY_API_URL = "https://api.tavily.com/search"
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-
-MAX_SEARCHES_PER_ROADMAP = 16
-MAX_RESULTS_PER_SEARCH = 5
-
-
 ROADMAP_PROMPT = """
-You are an expert career learning advisor.
+You are an expert technical mentor and career roadmap designer.
 
-Create a detailed learning roadmap for the target job role using ONLY
-the skills supplied below.
+Create a detailed learning roadmap for the following target role.
 
-Arrange skills in a logical learning order. Prerequisites must come first.
-For each skill, create 2 to 5 practical subtopics in a useful learning order.
-Include a concise description and a realistic estimated number of study hours
-for each subtopic.
+TARGET ROLE:
+{target_role}
 
-Return ONLY valid JSON. Do not use Markdown or code fences.
-
-Use exactly this structure:
-{{
-  "roadmap": [
-    {{
-      "skill": "Python",
-      "priority": "High",
-      "estimated_hours": 12,
-      "subtopics": [
-        {{
-          "title": "Python fundamentals",
-          "description": "Learn variables, data types, conditions and loops.",
-          "estimated_hours": 3
-        }},
-        {{
-          "title": "Functions and modules",
-          "description": "Write reusable functions and organize Python code.",
-          "estimated_hours": 4
-        }}
-      ]
-    }}
-  ]
-}}
-
-Rules:
-- Keep every supplied skill and its original priority.
-- Do not add unrelated skills or remove supplied skills.
-- You may reorder the skills to create a sensible learning sequence.
-- Subtopics must be specific, practical and relevant to the skill.
-- Use positive integer values for estimated hours.
-- Do not generate URLs or learning resource links.
-- The backend handles learning resource search.
-
-Target role: {target_role}
-
-Prioritized skills:
+PRIORITIZED SKILLS:
 {skills_list}
+
+IMPORTANT INSTRUCTIONS:
+
+1. Follow the exact skill order provided in PRIORITIZED SKILLS.
+2. Do not rearrange the skills.
+3. Do not remove any skill.
+4. Do not add any extra skills.
+5. Create practical learning subtopics for every skill.
+6. Keep the learning sequence beginner-friendly.
+7. Include a short description for each subtopic.
+8. Give realistic estimated learning hours.
+9. Return valid JSON only.
+10. Do not include Markdown code fences.
+11. Preserve the priority, priority_score, and priority_rank
+    provided for each skill.
+
+Return JSON in this exact structure:
+
+{{
+    "roadmap": [
+        {{
+            "skill": "Python",
+            "priority": "High",
+            "priority_score": 95,
+            "priority_rank": 1,
+            "estimated_hours": 20,
+            "subtopics": [
+                {{
+                    "title": "Python Basics",
+                    "description": "Learn variables, data types and operators.",
+                    "estimated_hours": 5
+                }}
+            ]
+        }}
+    ]
+}}
 """
 
 
-def _normalise_name(value: str) -> str:
-    """Normalize names to make matching tolerant of case and whitespace."""
-    if not isinstance(value, str):
-        return ""
+def _normalise_skill(skill: str) -> str:
+    """
+    Normalize skill names for matching.
+    """
+    return re.sub(
+        r"\s+",
+        " ",
+        str(skill).strip()
+    ).casefold()
 
-    return re.sub(r"\s+", " ", value.strip()).casefold()
 
-
-def _positive_hours(value, default: int = 1) -> int:
-    """Return a safe positive integer for estimated study hours."""
+def _is_valid_url(url: str) -> bool:
+    """
+    Check whether a resource URL is a valid HTTP or HTTPS URL.
+    """
     try:
-        hours = int(value)
-        return max(1, min(hours, 500))
+        parsed = urlparse(url)
 
-    except (TypeError, ValueError, OverflowError):
-        return default
+        return (
+            parsed.scheme in {"http", "https"}
+            and bool(parsed.netloc)
+        )
+
+    except Exception:
+        return False
 
 
-def _is_relevant_learning_resource(
-    title: str,
-    url: str,
-    skill: str,
-    subtopic: str,
-    content: str = "",
-) -> bool:
+def _search_learning_resources(query: str) -> list[dict]:
     """
-    Reject job listings, directories and unrelated search results.
+    Search for learning resources using Tavily.
 
-    Relevance is checked using the skill and subtopic keywords
-    against the result title, URL and Tavily content.
+    If Tavily is not configured or the search fails,
+    return an empty list rather than failing roadmap generation.
     """
-
-    if not isinstance(url, str) or not url.strip():
-        return False
-
-    parsed_url = urlparse(url.strip())
-
-    # Only allow HTTPS resources.
-    if parsed_url.scheme.casefold() != "https":
-        return False
-
-    domain = (parsed_url.hostname or "").casefold()
-
-    if not domain:
-        return False
-
-    # Block known job/recruitment and business-directory domains.
-    blocked_domains = {
-        "indeed.com",
-        "leadiq.com",
-    }
-
-    if any(
-        domain == blocked or domain.endswith("." + blocked)
-        for blocked in blocked_domains
-    ):
-        return False
-
-    title_lower = title.casefold()
-    url_lower = url.casefold()
-    content_lower = content.casefold()
-
-    # Reject job listings, recruitment pages and directories.
-    blocked_url_terms = {
-        "/jobs",
-        "/job/",
-        "/careers",
-        "/recruitment",
-        "job-listing",
-        "company-directory",
-        "business-directory",
-    }
-
-    if any(term in url_lower for term in blocked_url_terms):
-        return False
-
-    blocked_title_terms = {
-        "jobs hiring",
-        "job openings",
-        "companies directory",
-        "company directory",
-        "top companies",
-        "salary guide",
-        "job description",
-    }
-
-    if any(term in title_lower for term in blocked_title_terms):
-        return False
-
-    # Words that do not meaningfully identify a learning topic.
-    stop_words = {
-        "the",
-        "and",
-        "for",
-        "with",
-        "from",
-        "into",
-        "your",
-        "you",
-        "are",
-        "was",
-        "were",
-        "this",
-        "that",
-        "these",
-        "those",
-        "learn",
-        "learning",
-        "course",
-        "tutorial",
-        "guide",
-        "beginner",
-        "advanced",
-        "introduction",
-        "basics",
-        "basic",
-        "official",
-        "documentation",
-        "docs",
-        "how",
-        "what",
-        "why",
-        "using",
-        "use",
-        "complete",
-        "best",
-    }
-
-    # Extract meaningful keywords from the skill and subtopic.
-    topic_text = f"{skill} {subtopic}".casefold()
-
-    topic_words = {
-        word
-        for word in re.findall(r"[a-z0-9+#.]+", topic_text)
-        if len(word) > 1 and word not in stop_words
-    }
-
-    if not topic_words:
-        return False
-
-    # Search across all available Tavily result information.
-    searchable_text = (
-        f"{title_lower} {url_lower} {content_lower}"
-    )
-
-    # Token-based matching avoids accidental substring matches.
-    searchable_words = set(
-        re.findall(r"[a-z0-9+#.]+", searchable_text)
-    )
-
-    matched_keywords = topic_words.intersection(searchable_words)
-
-    # Require at least two matching topic keywords when possible.
-    # If only one meaningful keyword exists, require that one.
-    required_matches = min(2, len(topic_words))
-
-    if len(matched_keywords) < required_matches:
-        return False
-
-    return True
-
-
-def _search_tavily(
-    query: str,
-    skill: str = "",
-    subtopic: str = "",
-) -> list[dict]:
-    """Search Tavily and return filtered, deduplicated HTTPS resources."""
-
-    api_key = os.getenv("TAVILY_API_KEY") or TAVILY_API_KEY
+    api_key = os.getenv("TAVILY_API_KEY")
 
     if not api_key:
         return []
 
     try:
         response = httpx.post(
-            TAVILY_API_URL,
+            "https://api.tavily.com/search",
             json={
                 "api_key": api_key,
                 "query": query,
                 "search_depth": "basic",
-                "max_results": MAX_RESULTS_PER_SEARCH,
-                "include_answer": False,
+                "max_results": 5,
+                "include_answer": False
             },
-            timeout=8.0,
+            timeout=15.0
         )
 
         response.raise_for_status()
+
         data = response.json()
 
-    except (httpx.HTTPError, ValueError):
+        results = data.get("results", [])
+
+        resources = []
+
+        for result in results:
+
+            title = result.get("title")
+            url = result.get("url")
+
+            if not title or not url:
+                continue
+
+            if not _is_valid_url(url):
+                continue
+
+            resources.append({
+                "title": title.strip(),
+                "url": url.strip(),
+                "type": "documentation"
+            })
+
+        return resources
+
+    except Exception as e:
+        print(f"Tavily resource search error: {e}")
         return []
 
-    if not isinstance(data, dict):
-        return []
 
-    results = data.get("results", [])
+def _preserve_roadmap_progress(
+    generated_roadmap: list[dict],
+    existing_roadmap: list[dict]
+) -> list[dict]:
+    """
+    Preserve existing skill and subtopic progress when
+    a roadmap is regenerated.
+    """
+    existing_skills = {}
 
-    if not isinstance(results, list):
-        return []
+    for item in existing_roadmap:
 
-    resources = []
-    seen_urls = set()
-
-    for item in results:
         if not isinstance(item, dict):
             continue
 
-        title = item.get("title")
-        url = item.get("url")
-        content = item.get("content", "")
+        skill_name = item.get("skill")
 
-        if not isinstance(title, str) or not isinstance(url, str):
+        if not skill_name:
             continue
 
-        if not isinstance(content, str):
-            content = ""
+        existing_skills[
+            _normalise_skill(skill_name)
+        ] = item
 
-        title = title.strip()
-        url = url.strip()
-        content = content.strip()
+    for new_item in generated_roadmap:
 
-        if not title or not url:
+        skill_key = _normalise_skill(
+            new_item.get("skill", "")
+        )
+
+        old_item = existing_skills.get(skill_key)
+
+        if not old_item:
             continue
 
-        # Apply the stricter relevance filter.
-        if not _is_relevant_learning_resource(
-            title=title,
-            url=url,
-            skill=skill,
-            subtopic=subtopic,
-            content=content,
-        ):
-            continue
-
-        # Normalize URL for duplicate detection.
-        normalized_url = url.rstrip("/").casefold()
-
-        if normalized_url in seen_urls:
-            continue
-
-        seen_urls.add(normalized_url)
-
-        resources.append(
-            {
-                "title": title,
-                "url": url,
-                "type": "learning_resource",
-            }
+        # Preserve overall skill status.
+        new_item["status"] = old_item.get(
+            "status",
+            "Not Started"
         )
 
-    return resources
+        # Match old subtopics by title.
+        old_subtopics = {}
 
+        for old_subtopic in old_item.get("subtopics", []):
 
-def _clean_gemini_json(raw_text: str) -> dict:
-    """Parse Gemini JSON, including responses wrapped in code fences."""
+            if not isinstance(old_subtopic, dict):
+                continue
 
-    raw_text = raw_text.strip()
+            title = old_subtopic.get("title")
 
-    if raw_text.startswith("```"):
-        raw_text = re.sub(
-            r"^```(?:json)?\s*",
-            "",
-            raw_text,
-            count=1,
-            flags=re.IGNORECASE,
-        )
+            if title:
+                old_subtopics[
+                    _normalise_skill(title)
+                ] = old_subtopic
 
-        raw_text = re.sub(r"\s*```$", "", raw_text)
+        for new_subtopic in new_item.get("subtopics", []):
 
-    try:
-        parsed = json.loads(raw_text)
+            title_key = _normalise_skill(
+                new_subtopic.get("title", "")
+            )
 
-    except (json.JSONDecodeError, TypeError):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini returned an invalid roadmap. Please try again.",
-        )
+            old_subtopic = old_subtopics.get(title_key)
 
-    if (
-        not isinstance(parsed, dict)
-        or not isinstance(parsed.get("roadmap"), list)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                "Gemini returned an invalid roadmap structure. "
-                "Please try again."
-            ),
-        )
+            if old_subtopic:
+                new_subtopic["status"] = old_subtopic.get(
+                    "status",
+                    "Not Started"
+                )
 
-    return parsed
+    return generated_roadmap
 
 
 def generate_roadmap(
     target_role: str,
-    prioritized_skills: list[dict],
+    prioritized_skills: list[dict]
 ) -> dict:
-    """Generate a roadmap and attach relevant learning resources."""
+    """
+    Generate a roadmap using the already-prioritized skills.
+
+    The backend determines the final skill order.
+    Gemini only generates learning content for those skills.
+    """
 
     if not prioritized_skills:
         return {
             "target_role": target_role,
-            "roadmap": [],
+            "roadmap": []
         }
 
     if client is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Gemini API is not configured. Set GEMINI_API_KEY.",
+            detail="Gemini AI service is not configured."
         )
 
+    # Prepare and validate skills.
     original_skills = {}
 
-    for skill in prioritized_skills:
-        name = str(skill.get("skill", "")).strip()
+    for item in prioritized_skills:
 
-        if not name:
+        if not isinstance(item, dict):
             continue
 
-        original_skills[_normalise_name(name)] = {
-            "skill": name,
-            "priority": str(skill.get("priority", "Medium")),
+        skill_name = item.get("skill")
+
+        if not isinstance(skill_name, str) or not skill_name.strip():
+            continue
+
+        skill_name = skill_name.strip()
+
+        skill_key = _normalise_skill(skill_name)
+
+        if skill_key in original_skills:
+            continue
+
+        score = item.get("priority_score", 50)
+        rank = item.get("priority_rank", len(original_skills) + 1)
+
+        try:
+            score = float(score)
+            rank = int(rank)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid priority data for skill: {skill_name}"
+            )
+
+        if not 0 <= score <= 100 or rank < 1:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid priority score or rank for skill: {skill_name}"
+            )
+
+        priority = item.get("priority")
+
+        if priority not in {"High", "Medium", "Low"}:
+            if score >= 80:
+                priority = "High"
+            elif score >= 50:
+                priority = "Medium"
+            else:
+                priority = "Low"
+
+        original_skills[skill_key] = {
+            "skill": skill_name,
+            "priority": priority,
+            "priority_score": score,
+            "priority_rank": rank
         }
 
     if not original_skills:
         return {
             "target_role": target_role,
-            "roadmap": [],
+            "roadmap": []
         }
 
-    skills_list = "\n".join(
-        f"- {item['skill']} (Priority: {item['priority']})"
-        for item in original_skills.values()
+    # Sort by backend-assigned rank.
+    sorted_skills = sorted(
+        original_skills.values(),
+        key=lambda item: item["priority_rank"]
+    )
+
+    # Build the prompt input in the exact backend order.
+    skills_list = json.dumps(
+        sorted_skills,
+        ensure_ascii=False,
+        indent=2
     )
 
     prompt = ROADMAP_PROMPT.format(
         target_role=target_role,
-        skills_list=skills_list,
+        skills_list=skills_list
     )
 
+    # Generate roadmap content using Gemini.
     try:
         response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=prompt,
+            contents=prompt
         )
 
-    except Exception as exc:
-        print("Roadmap generation failed:", type(exc).__name__)
+        raw_text = (response.text or "").strip()
+
+        if not raw_text:
+            raise ValueError("Gemini returned an empty response.")
+
+    except Exception as e:
+        print(f"Gemini roadmap generation error: {e}")
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to reach Gemini API. Please try again later.",
-        ) from exc
-
-    raw_text = getattr(response, "text", None)
-
-    if not raw_text:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini returned an empty roadmap. Please try again.",
+            detail="Unable to generate the learning roadmap."
         )
 
-    parsed = _clean_gemini_json(raw_text)
+    # Remove Markdown code fences.
+    raw_text = re.sub(
+        r"^```(?:json)?\s*|\s*```$",
+        "",
+        raw_text,
+        flags=re.IGNORECASE
+    ).strip()
 
+    # Parse Gemini response.
+    try:
+        parsed = json.loads(raw_text)
+
+        if not isinstance(parsed, dict):
+            raise ValueError("Invalid roadmap response.")
+
+        generated_items = parsed.get("roadmap")
+
+        if not isinstance(generated_items, list):
+            raise ValueError("Roadmap must be a list.")
+
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        print(f"Roadmap JSON parsing error: {e}")
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned an invalid roadmap response."
+        )
+
+    # Index generated content by skill name.
     generated_by_name = {}
 
-    for item in parsed["roadmap"]:
+    for item in generated_items:
+
         if not isinstance(item, dict):
             continue
 
-        name = str(item.get("skill", "")).strip()
-        normalized = _normalise_name(name)
+        skill_name = item.get("skill")
 
-        # Do not accept skills Gemini added independently.
-        if normalized not in original_skills:
+        if not isinstance(skill_name, str) or not skill_name.strip():
             continue
 
-        generated_by_name.setdefault(normalized, item)
+        skill_key = _normalise_skill(skill_name)
 
-    # Keep Gemini's learning order while retaining all supplied skills.
-    ordered_names = [
-        _normalise_name(str(item.get("skill", "")))
-        for item in parsed["roadmap"]
-        if isinstance(item, dict)
-        and _normalise_name(str(item.get("skill", "")))
-        in original_skills
-    ]
+        # Ignore skills that were not requested.
+        if skill_key not in original_skills:
+            continue
 
-    ordered_names = list(dict.fromkeys(ordered_names))
+        if skill_key in generated_by_name:
+            continue
 
-    for normalized in original_skills:
-        if normalized not in ordered_names:
-            ordered_names.append(normalized)
+        generated_by_name[skill_key] = item
 
     roadmap_items = []
-    searches_used = 0
 
-    for normalized in ordered_names:
-        original = original_skills[normalized]
-        generated = generated_by_name.get(normalized, {})
+    # IMPORTANT:
+    # Iterate through sorted_skills, not Gemini's returned order.
+    # This guarantees that priority ranking is preserved.
+    for skill_data in sorted_skills:
 
-        raw_subtopics = generated.get("subtopics", [])
+        skill_name = skill_data["skill"]
+        skill_key = _normalise_skill(skill_name)
 
-        if not isinstance(raw_subtopics, list):
-            raw_subtopics = []
+        generated_item = generated_by_name.get(
+            skill_key,
+            {}
+        )
+
+        generated_subtopics = generated_item.get(
+            "subtopics",
+            []
+        )
+
+        if not isinstance(generated_subtopics, list):
+            generated_subtopics = []
 
         subtopics = []
 
-        for raw_subtopic in raw_subtopics:
-            if not isinstance(raw_subtopic, dict):
+        for subtopic in generated_subtopics:
+
+            if not isinstance(subtopic, dict):
                 continue
 
-            title = str(raw_subtopic.get("title", "")).strip()
+            title = subtopic.get("title")
 
-            if not title:
+            if not isinstance(title, str) or not title.strip():
                 continue
 
-            description = str(
-                raw_subtopic.get("description", "")
-            ).strip()
-
-            hours = _positive_hours(
-                raw_subtopic.get("estimated_hours", 1)
+            description = subtopic.get(
+                "description",
+                ""
             )
 
-            resources = []
-
-            if searches_used < MAX_SEARCHES_PER_ROADMAP:
-                query = (
-                    f'"{original["skill"]}" "{title}" '
-                    "official documentation tutorial"
+            try:
+                estimated_hours = int(
+                    subtopic.get("estimated_hours", 1)
                 )
+            except (TypeError, ValueError):
+                estimated_hours = 1
 
-                resources = _search_tavily(
-                    query=query,
-                    skill=original["skill"],
-                    subtopic=title,
-                )
+            estimated_hours = max(1, estimated_hours)
 
-                searches_used += 1
-
-            subtopics.append(
-                {
-                    "title": title,
-                    "description": description,
-                    "estimated_hours": hours,
-                    "resources": resources,
-                    "status": "Not Started",
-                }
+            # Search for learning resources.
+            resources = _search_learning_resources(
+                f"{title} {skill_name} official documentation tutorial"
             )
 
-        if subtopics:
-            skill_hours = sum(
-                item["estimated_hours"] for item in subtopics
+            subtopics.append({
+                "title": title.strip(),
+                "description": (
+                    description.strip()
+                    if isinstance(description, str)
+                    else ""
+                ),
+                "estimated_hours": estimated_hours,
+                "resources": resources,
+                "status": "Not Started"
+            })
+
+        # If Gemini omitted all subtopics for a skill,
+        # fail rather than silently creating an incomplete roadmap.
+        if not subtopics:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Gemini did not generate subtopics for {skill_name}."
             )
 
-        else:
-            skill_hours = _positive_hours(
-                generated.get("estimated_hours", 1)
+        try:
+            estimated_hours = int(
+                generated_item.get("estimated_hours", 1)
             )
+        except (TypeError, ValueError):
+            estimated_hours = 1
 
-        roadmap_items.append(
-            {
-                "skill": original["skill"],
-                "priority": original["priority"],
-                "status": "Not Started",
-                "estimated_hours": skill_hours,
-                "subtopics": subtopics,
-            }
-        )
+        estimated_hours = max(1, estimated_hours)
+
+        roadmap_items.append({
+            "skill": skill_name,
+            "priority": skill_data["priority"],
+            "priority_score": skill_data["priority_score"],
+            "priority_rank": skill_data["priority_rank"],
+            "status": "Not Started",
+            "estimated_hours": estimated_hours,
+            "subtopics": subtopics
+        })
 
     return {
         "target_role": target_role,
-        "roadmap": roadmap_items,
+        "roadmap": roadmap_items
     }
-
-
-def _preserve_roadmap_progress(
-    new_roadmap: list[dict],
-    old_roadmap: list[dict],
-) -> list[dict]:
-    """Retain statuses for skills and subtopics that still match."""
-
-    old_skills = {
-        _normalise_name(item.get("skill", "")): item
-        for item in old_roadmap
-        if isinstance(item, dict)
-    }
-
-    for new_skill in new_roadmap:
-        old_skill = old_skills.get(
-            _normalise_name(new_skill.get("skill", ""))
-        )
-
-        if not old_skill:
-            continue
-
-        old_subtopics = {
-            _normalise_name(item.get("title", "")): item
-            for item in old_skill.get("subtopics", [])
-            if isinstance(item, dict)
-        }
-
-        for new_subtopic in new_skill.get("subtopics", []):
-            old_subtopic = old_subtopics.get(
-                _normalise_name(new_subtopic.get("title", ""))
-            )
-
-            if old_subtopic:
-                new_subtopic["status"] = old_subtopic.get(
-                    "status",
-                    "Not Started",
-                )
-
-        # Derive skill status from its current subtopics where possible.
-        new_subtopics = new_skill.get("subtopics", [])
-
-        if new_subtopics:
-            statuses = [
-                item.get("status", "Not Started")
-                for item in new_subtopics
-            ]
-
-            if all(value == "Completed" for value in statuses):
-                new_skill["status"] = "Completed"
-
-            elif any(value != "Not Started" for value in statuses):
-                new_skill["status"] = "In Progress"
-
-            else:
-                new_skill["status"] = "Not Started"
-
-        else:
-            new_skill["status"] = old_skill.get(
-                "status",
-                "Not Started",
-            )
-
-    return new_roadmap
 
 
 def save_roadmap(
-    user_email: str,
+    user_id: str,
     target_role: str,
-    roadmap: list[dict],
-) -> None:
-    """Save a roadmap while preserving progress for matching topics."""
+    roadmap: list[dict]
+) -> dict:
+    """
+    Save the generated roadmap.
 
-    existing = roadmaps_collection.find_one(
-        {"user_email": user_email}
+    This implementation assumes your MongoDB database has
+    a 'roadmaps' collection and stores one roadmap per user.
+    """
+
+    existing_document = db.roadmaps.find_one({
+        "user_id": user_id
+    })
+
+    existing_roadmap = []
+
+    if existing_document:
+        existing_roadmap = existing_document.get(
+            "roadmap",
+            []
+        )
+
+    roadmap = _preserve_roadmap_progress(
+        roadmap,
+        existing_roadmap
     )
 
-    if existing:
-        old_roadmap = existing.get("roadmap", [])
+    roadmap_document = {
+        "user_id": user_id,
+        "target_role": target_role,
+        "roadmap": roadmap
+    }
 
-        if isinstance(old_roadmap, list):
-            roadmap = _preserve_roadmap_progress(
-                new_roadmap=roadmap,
-                old_roadmap=old_roadmap,
-            )
-
-    roadmaps_collection.update_one(
-        {"user_email": user_email},
-        {
-            "$set": {
-                "user_email": user_email,
-                "target_role": target_role,
-                "roadmap": roadmap,
-            }
-        },
-        upsert=True,
+    db.roadmaps.update_one(
+        {"user_id": user_id},
+        {"$set": roadmap_document},
+        upsert=True
     )
+
+    return roadmap_document

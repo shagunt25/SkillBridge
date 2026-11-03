@@ -1,6 +1,8 @@
 from fastapi import HTTPException, status
 
-from app.services.roadmap_service import roadmaps_collection
+from app.database.mongodb import db
+
+roadmaps_collection = db["roadmaps"]
 
 
 VALID_STATUSES = {

@@ -1,3 +1,4 @@
+
 from pydantic import BaseModel, Field
 from typing import List
 
@@ -19,6 +20,8 @@ class RoadmapSubtopic(BaseModel):
 class RoadmapItem(BaseModel):
     skill: str
     priority: str
+    priority_score: float = Field(ge=0, le=100)
+    priority_rank: int = Field(ge=1)
     status: str = "Not Started"
     estimated_hours: int = 1
     subtopics: List[RoadmapSubtopic] = Field(default_factory=list)
