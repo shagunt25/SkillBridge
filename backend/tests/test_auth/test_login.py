@@ -1,4 +1,11 @@
+from unittest.mock import patch
+from uuid import uuid4
+
 import pytest
+from fastapi import HTTPException
+
+from app.database.mongodb import db
+from app.services import auth_service
 
 LOGIN_CREDENTIALS = {
     "email": "tester@example.com",
@@ -91,4 +98,121 @@ def test_login_nosql_injection(client):
     response = client.post("/api/auth/login", json=payload)
     
     assert response.status_code == 422
+
+
+def test_login_rate_limits_failed_attempts_per_email_and_ip(
+    client,
+    monkeypatch,
+):
+    email = f"rate-limit-{uuid4().hex}@example.com"
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS",
+        2,
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS",
+        100,
+    )
+    auth_service.login_rate_limits_collection.delete_many({})
+
+    try:
+        with patch(
+            "app.routes.auth.authenticate_user",
+            side_effect=HTTPException(
+                status_code=401,
+                detail="Invalid email or password.",
+            ),
+        ) as authenticate:
+            responses = [
+                client.post(
+                    "/api/auth/login",
+                    json={"email": email, "password": "WrongPassword123!"},
+                )
+                for _ in range(3)
+            ]
+
+        assert [response.status_code for response in responses] == [
+            401,
+            401,
+            429,
+        ]
+        assert responses[-1].headers["retry-after"].isdigit()
+        assert authenticate.call_count == 2
+    finally:
+        auth_service.login_rate_limits_collection.delete_many({})
+
+
+def test_login_rate_limits_failed_attempts_per_ip(client, monkeypatch):
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS",
+        100,
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS",
+        2,
+    )
+    auth_service.login_rate_limits_collection.delete_many({})
+
+    try:
+        with patch(
+            "app.routes.auth.authenticate_user",
+            side_effect=HTTPException(
+                status_code=401,
+                detail="Invalid email or password.",
+            ),
+        ) as authenticate:
+            responses = [
+                client.post(
+                    "/api/auth/login",
+                    json={
+                        "email": f"rate-limit-{uuid4().hex}@example.com",
+                        "password": "WrongPassword123!",
+                    },
+                )
+                for _ in range(3)
+            ]
+
+        assert [response.status_code for response in responses] == [
+            401,
+            401,
+            429,
+        ]
+        assert authenticate.call_count == 2
+    finally:
+        auth_service.login_rate_limits_collection.delete_many({})
+
+
+def test_successful_logins_do_not_consume_failure_limits(
+    client,
+    monkeypatch,
+):
+    email = f"rate-limit-success-{uuid4().hex}@example.com"
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS",
+        1,
+    )
+    auth_service.login_rate_limits_collection.delete_many({})
+
+    try:
+        with patch(
+            "app.routes.auth.authenticate_user",
+            return_value="test-access-token",
+        ):
+            responses = [
+                client.post(
+                    "/api/auth/login",
+                    json={"email": email, "password": "CorrectPassword123!"},
+                )
+                for _ in range(2)
+            ]
+
+        assert [response.status_code for response in responses] == [200, 200]
+        assert auth_service.login_rate_limits_collection.count_documents({}) == 0
+    finally:
+        auth_service.login_rate_limits_collection.delete_many({})
 

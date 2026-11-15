@@ -64,3 +64,7 @@ def ensure_indexes() -> None:
         unique=True,
         partialFilterExpression={"user_email": {"$type": "string"}},
     )
+    db["login_rate_limits"].create_index(
+        "expires_at",
+        expireAfterSeconds=0,
+    )

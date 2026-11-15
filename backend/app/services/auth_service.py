@@ -1,5 +1,8 @@
 
 
+import hashlib
+import math
+import os
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
@@ -15,6 +18,90 @@ from app.utils.security import (
 )
 
 users_collection = db["users"]
+login_rate_limits_collection = db["login_rate_limits"]
+
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 900)
+)
+LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS = int(
+    os.getenv("LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS", 5)
+)
+LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS = int(
+    os.getenv("LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS", 30)
+)
+
+
+def _login_rate_limit_buckets(
+    email: str,
+    client_ip: str | None,
+    now: datetime | None = None,
+) -> list[tuple[str, int, datetime]]:
+    current_time = now or datetime.now(timezone.utc)
+    window_start = (
+        int(current_time.timestamp()) // LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    )
+    expires_at = datetime.fromtimestamp(
+        (window_start + 1) * LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    email_hash = hashlib.sha256(email.casefold().encode("utf-8")).hexdigest()
+    ip_hash = hashlib.sha256(
+        (client_ip or "unknown").encode("utf-8")
+    ).hexdigest()
+
+    return [
+        (
+            hashlib.sha256(
+                f"email-ip:{window_start}:{email_hash}:{ip_hash}".encode()
+            ).hexdigest(),
+            LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS,
+            expires_at,
+        ),
+        (
+            hashlib.sha256(
+                f"ip:{window_start}:{ip_hash}".encode()
+            ).hexdigest(),
+            LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS,
+            expires_at,
+        ),
+    ]
+
+
+def check_login_rate_limit(email: str, client_ip: str | None) -> None:
+    now = datetime.now(timezone.utc)
+    for bucket_id, max_attempts, expires_at in _login_rate_limit_buckets(
+        email,
+        client_ip,
+        now,
+    ):
+        bucket = login_rate_limits_collection.find_one({"_id": bucket_id})
+        if bucket and bucket.get("attempts", 0) >= max_attempts:
+            retry_after = max(
+                1,
+                math.ceil(
+                    (expires_at - now.replace(tzinfo=None)).total_seconds()
+                ),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. Please try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+
+def record_failed_login(email: str, client_ip: str | None) -> None:
+    for bucket_id, _, expires_at in _login_rate_limit_buckets(
+        email,
+        client_ip,
+    ):
+        login_rate_limits_collection.update_one(
+            {"_id": bucket_id},
+            {
+                "$inc": {"attempts": 1},
+                "$setOnInsert": {"expires_at": expires_at},
+            },
+            upsert=True,
+        )
 
 
 def create_user(signup_data: SignupRequest) -> dict:

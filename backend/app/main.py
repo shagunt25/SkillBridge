@@ -19,6 +19,11 @@ from app.database.mongodb import (
     is_valid_database_name,
     is_valid_mongodb_uri,
 )
+from app.services.auth_service import (
+    LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS,
+    LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS,
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+)
 from app.utils.security import JWT_SECRET
 
 
@@ -105,6 +110,14 @@ def validate_configuration() -> None:
         or len(JWT_SECRET.encode("utf-8")) < 32
     ):
         invalid_settings.append("JWT_SECRET")
+    if LOGIN_RATE_LIMIT_WINDOW_SECONDS <= 0:
+        invalid_settings.append("LOGIN_RATE_LIMIT_WINDOW_SECONDS")
+    if LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS <= 0:
+        invalid_settings.append(
+            "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS"
+        )
+    if LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS <= 0:
+        invalid_settings.append("LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS")
 
     if invalid_settings:
         settings = ", ".join(invalid_settings)

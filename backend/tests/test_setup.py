@@ -42,6 +42,9 @@ def test_unique_indexes_are_enforced(client):
         ("DATABASE_NAME", "invalid/name"),
         ("JWT_SECRET", "your_jwt_secret_here"),
         ("JWT_SECRET", "short-secret"),
+        ("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 0),
+        ("LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS", 0),
+        ("LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS", -1),
     ],
 )
 def test_invalid_required_configuration_is_rejected(
@@ -53,6 +56,9 @@ def test_invalid_required_configuration_is_rejected(
         "MONGODB_URI": "mongodb://localhost:27017",
         "DATABASE_NAME": "skillbridge_test",
         "JWT_SECRET": "skillbridge-test-only-secret-not-for-production",
+        "LOGIN_RATE_LIMIT_WINDOW_SECONDS": 900,
+        "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS": 5,
+        "LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS": 30,
     }
     for name, default in defaults.items():
         monkeypatch.setattr("app.main." + name, default)
@@ -71,3 +77,8 @@ def test_roadmap_unique_index_excludes_unowned_legacy_records(client):
     assert index["partialFilterExpression"] == {
         "user_email": {"$type": "string"}
     }
+
+
+def test_login_rate_limit_index_expires_old_buckets(client):
+    index = db.login_rate_limits.index_information()["expires_at_1"]
+    assert index["expireAfterSeconds"] == 0

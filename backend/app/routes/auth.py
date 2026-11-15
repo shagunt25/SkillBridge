@@ -1,6 +1,6 @@
 
 import os
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.schemas.auth import (
     SignupRequest,
@@ -17,6 +17,8 @@ from app.schemas.auth import (
 from app.services.auth_service import (
     create_user,
     authenticate_user,
+    check_login_rate_limit,
+    record_failed_login,
     reset_password,
 )
 from app.services.otp_service import (
@@ -52,8 +54,20 @@ def resend_otp(payload: ResendOtpRequest):
 
 
 @router.post("/login", response_model=MessageResponse)
-def login(payload: LoginRequest, response: Response):
-    token = authenticate_user(payload.email, payload.password)
+def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+):
+    client_ip = request.client.host if request.client else None
+    check_login_rate_limit(payload.email, client_ip)
+
+    try:
+        token = authenticate_user(payload.email, payload.password)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            record_failed_login(payload.email, client_ip)
+        raise
 
     response.set_cookie(
         key=COOKIE_NAME,

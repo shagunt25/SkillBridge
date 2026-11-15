@@ -111,6 +111,10 @@ curl -X POST "http://127.0.0.1:8000/api/resume/upload" -F "file=@C:\path\to\resu
 
 Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-password` enforce a cooldown between consecutive requests, controlled by `OTP_RESEND_COOLDOWN_SECONDS` in `.env` (default: 60 seconds). Requesting a new code before the cooldown expires returns a `429 Too Many Requests` with a message telling the user how many seconds remain.
 
+`POST /api/auth/login` also limits failed attempts using MongoDB-backed counters: 5 per email/IP pair and 30 per IP in each 15-minute window by default. Configure the limits with `LOGIN_RATE_LIMIT_WINDOW_SECONDS`, `LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS`, and `LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS`. A blocked login returns `429 Too Many Requests` and a `Retry-After` header. The counters expire automatically through a MongoDB TTL index.
+
+The login limiter uses the request's client IP. When running behind a reverse proxy, configure Uvicorn's forwarded-header trust only for that trusted proxy so IP-based limits use the actual client address.
+
 ## Session Invalidation on Password Change
 
 JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€” via `POST /api/auth/reset-password` (forgot-password flow) or `POST /api/users/me/change-password` (logged-in flow) â€” the user's `password_changed_at` timestamp is updated in MongoDB. `get_current_user()` compares this against each token's `iat` on every request; any token issued *before* the most recent password change is rejected, forcing re-login. This prevents an old, possibly compromised session from remaining valid after a password change.
