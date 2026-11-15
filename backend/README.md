@@ -26,8 +26,10 @@ source venv/bin/activate      # Mac/Linux
 
 ### 3. Install dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+This installs the runtime dependencies from `requirements.txt` along with the test tools. For a runtime-only install, use `pip install -r requirements.txt`.
 
 ### 4. Create your own .env file
 Copy `.env.example` to `.env`, then fill in your own values:
@@ -50,6 +52,11 @@ Server runs at http://127.0.0.1:8000
 
 ### 6. Test the API
 Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) â€” every endpoint can be tested directly from there.
+
+To run the automated backend tests from the `backend` directory:
+```bash
+python -m pytest -q
+```
 
 **Note:** if the file-upload endpoint's browser file picker freezes (a known Chrome/Windows issue), test via `curl` instead:
 ```bash
