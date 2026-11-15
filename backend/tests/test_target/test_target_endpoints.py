@@ -1,3 +1,6 @@
+import json
+
+import pytest
 from unittest.mock import patch, MagicMock
 import jwt
 from app.database.mongodb import db
@@ -104,6 +107,120 @@ def test_target_markdown_stripping(client, resume_token):
         
         assert response.status_code == 200
         assert "aws" in response.json()["required_skills"]
+
+
+@pytest.mark.parametrize(
+    "ai_text",
+    [
+        "[]",
+        '{"target_role": "backend developer"}',
+        '{"target_role": "backend developer", "required_skills": "python"}',
+        '{"target_role": "backend developer", "required_skills": [12]}',
+        '{"target_role": "backend developer", "required_skills": []}',
+        '{"target_role": "   ", "required_skills": ["python"]}',
+        '{"target_role": "backend developer", "required_skills": ["python"], "extra": true}',
+    ],
+)
+def test_target_rejects_malformed_ai_payload(client, resume_token, ai_text):
+    mock_ai = MagicMock()
+    mock_ai.text = ai_text
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 502
+    assert "expected target skills format" in response.json()["detail"]
+
+
+def test_target_rejects_ai_skill_lists_over_limit(client, resume_token):
+    mock_ai = MagicMock()
+    mock_ai.text = json.dumps({
+        "target_role": "backend developer",
+        "required_skills": [f"skill-{index}" for index in range(51)],
+    })
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 502
+
+
+def test_target_rejects_oversized_ai_skill_name(client, resume_token):
+    mock_ai = MagicMock()
+    mock_ai.text = json.dumps({
+        "target_role": "backend developer",
+        "required_skills": ["python" * 17],
+    })
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 502
+
+
+def test_target_normalizes_and_deduplicates_ai_skills(client, resume_token):
+    mock_ai = MagicMock()
+    mock_ai.text = (
+        '{"target_role": " Backend Developer ", '
+        '"required_skills": [" Python ", "python", "REST APIs"]}'
+    )
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "target_role": "Backend Developer",
+        "required_skills": ["python", "rest apis"],
+    }
+
+
+def test_target_without_gemini_configuration_returns_503(client, resume_token):
+    with patch("app.services.target_service.client", None):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 503
+
+
+def test_target_requests_reject_whitespace_only_input(client, resume_token):
+    career_response = client.post(
+        "/target/career",
+        json={"target_role": "   "},
+    )
+    job_response = client.post(
+        "/target/job",
+        json={"job_description": " \n\t "},
+    )
+
+    assert career_response.status_code == 422
+    assert job_response.status_code == 422
 
 
 def test_target_database_persistence(client, resume_token):

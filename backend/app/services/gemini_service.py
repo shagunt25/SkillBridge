@@ -132,7 +132,7 @@ def generate_resume_content(resume_text: str):
     )
 
 
-def _remove_code_fences(raw_text: str) -> str:
+def remove_code_fences(raw_text: str | None) -> str:
     """Remove optional Markdown JSON fences from Gemini output."""
     raw_text = (raw_text or "").strip()
 
@@ -160,7 +160,7 @@ def analyze_resume_text(resume_text: str) -> dict:
             detail="Gemini API request failed after retries.",
         ) from exc
 
-    raw_text = _remove_code_fences(response.text)
+    raw_text = remove_code_fences(response.text)
 
     if not raw_text:
         raise HTTPException(
@@ -264,7 +264,7 @@ def prioritize_missing_skills(
             contents=prompt,
         )
 
-        raw_text = _remove_code_fences(response.text)
+        raw_text = remove_code_fences(response.text)
 
         if not raw_text:
             raise ValueError("Gemini returned an empty prioritization response.")

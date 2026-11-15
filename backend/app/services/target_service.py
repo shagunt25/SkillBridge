@@ -1,6 +1,16 @@
+import logging
 import json
 from fastapi import HTTPException, status
-from app.services.gemini_service import client, MODEL_NAME
+from pydantic import ValidationError
+
+from app.schemas.target import GeneratedTargetSkills
+from app.services.gemini_service import (
+    MODEL_NAME,
+    client,
+    remove_code_fences,
+)
+
+logger = logging.getLogger(__name__)
 
 CAREER_PROMPT = """
 You are a career skills advisor. Given a job title/career goal, return the most important, commonly required technical and professional skills for that role today.
@@ -32,36 +42,48 @@ Job description:
 
 
 def _call_gemini_for_skills(prompt: str, input_text: str) -> dict:
+    if client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini API is not configured. Set GEMINI_API_KEY.",
+        )
+
     try:
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=prompt + input_text
         )
-    except Exception as e:
+    except Exception as exc:
+        logger.exception("Gemini failed to generate target skills")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to reach Gemini API: {str(e)}"
+            detail="Failed to reach Gemini API.",
+        ) from exc
+
+    raw_text = remove_code_fences(getattr(response, "text", None))
+    if not raw_text:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned an empty response. Please try again.",
         )
-
-    raw_text = response.text.strip()
-
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
 
     try:
         parsed = json.loads(raw_text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini returned an invalid response. Please try again."
-        )
+            detail="Gemini returned an invalid response. Please try again.",
+        ) from exc
 
-    parsed["required_skills"] = [skill.strip().lower() for skill in parsed.get("required_skills", [])]
+    try:
+        validated = GeneratedTargetSkills.model_validate(parsed)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini response did not match the expected target skills format.",
+        ) from exc
 
-    return parsed
+    return validated.model_dump()
 
 
 def get_skills_for_career(target_role: str) -> dict:
