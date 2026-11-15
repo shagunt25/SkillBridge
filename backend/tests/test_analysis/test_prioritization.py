@@ -50,7 +50,7 @@ def test_prioritized_skills_markdown_stripping(client, resume_token):
 # ---------------------------------------------------------
 # 2. LLM VULNERABILITIES & API CRASHES
 # ---------------------------------------------------------
-def test_prioritized_skills_llm_api_crash(client, resume_token):
+def test_prioritized_skills_llm_api_crash(client, resume_token, caplog):
     """Verifies that an upstream Gemini API crash is handled gracefully (502)."""
     user_email = get_test_user_email(client)
     db.resumes.insert_one({"user_email": user_email, "skills": [{"name": "python"}]})
@@ -59,6 +59,10 @@ def test_prioritized_skills_llm_api_crash(client, resume_token):
     with patch("app.services.gemini_service.client.models.generate_content", side_effect=Exception("API Timeout")):
         response = client.get("/analysis/prioritized-skills")
         assert response.status_code == 502
+
+    assert "Gemini skill prioritization failed" in caplog.text
+    assert "API Timeout" in caplog.text
+    assert "API Timeout" not in response.json()["detail"]
 
 
 def test_prioritized_skills_llm_invalid_json(client, resume_token):

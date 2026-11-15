@@ -81,7 +81,7 @@ def test_generate_roadmap_perfect_match(client, resume_token):
         assert len(data["roadmap"]) == 0
         mock_save.assert_called_once()
 
-def test_generate_roadmap_database_outage(client, resume_token):
+def test_generate_roadmap_database_outage(client, resume_token, caplog):
     """Verifies that a MongoDB connection drop during the save operation is handled."""
     mock_gap = {"target_role": "Backend Engineer", "missing_skills": ["docker"]}
     mock_prioritized = {
@@ -111,6 +111,9 @@ def test_generate_roadmap_database_outage(client, resume_token):
         
         response = client.post("/roadmap/generate")
         assert response.status_code == 500
+        assert "Failed to generate or save roadmap" in caplog.text
+        assert "DB Connection Lost" in caplog.text
+        assert "DB Connection Lost" not in response.json()["detail"]
 
 def test_generate_roadmap_wrong_method(client, resume_token):
     """Verifies that sending a GET request to a POST-only route is rejected (405)."""
@@ -133,7 +136,7 @@ def test_generate_roadmap_missing_target(client, resume_token):
         assert response.status_code == 404
         assert "target" in response.json()["detail"].lower()
 
-def test_generate_roadmap_ai_crash(client, resume_token):
+def test_generate_roadmap_ai_crash(client, resume_token, caplog):
     """Verifies handling of an upstream Gemini API timeout during roadmap generation."""
     mock_gap = {"target_role": "Backend", "missing_skills": ["aws"]}
     mock_prioritized = {
@@ -152,6 +155,8 @@ def test_generate_roadmap_ai_crash(client, resume_token):
         
         response = client.post("/roadmap/generate")
         assert response.status_code in [500, 502]
+        assert "Failed to generate or save roadmap" in caplog.text
+        assert "Gemini API Timeout" in caplog.text
 
 
 def test_save_roadmap_advances_version_and_preserves_progress():

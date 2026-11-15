@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from app.schemas.roadmap import RoadmapResponse
 from app.services.analysis_service import calculate_skill_gap
@@ -6,6 +8,7 @@ from app.services.roadmap_service import generate_roadmap, save_roadmap
 from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/generate", response_model=RoadmapResponse)
@@ -35,6 +38,7 @@ def generate_user_roadmap(current_user: dict = Depends(get_current_user)):
         raise
 
     except Exception as exc:
+        logger.exception("Failed to generate or save roadmap")
         raise HTTPException(
             status_code=500,
             detail="Failed to generate or save the roadmap due to a server error."

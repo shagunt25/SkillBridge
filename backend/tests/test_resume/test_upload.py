@@ -277,7 +277,13 @@ def test_upload_resume_database_persistence_strict(mock_generate, client, make_p
     
 @patch("app.services.resume_service.resumes_collection.update_one")
 @patch(GEMINI_MOCK_PATH)
-def test_upload_resume_database_outage(mock_generate, mock_db_update, client, make_pdf):
+def test_upload_resume_database_outage(
+    mock_generate,
+    mock_db_update,
+    client,
+    make_pdf,
+    caplog,
+):
     """Verifies the API handles a sudden MongoDB connection failure gracefully."""
     # 1. Override auth to ensure we reach the database logic
     strict_test_email = "db_outage_user@example.com"
@@ -298,6 +304,9 @@ def test_upload_resume_database_outage(mock_generate, mock_db_update, client, ma
         # 4. Assert backend doesn't crash the worker, but returns a clean 500 error
         assert response.status_code == 500
         assert "internal server error" in response.json()["detail"].lower() or "error" in response.json()["detail"].lower()
+        assert "Failed to save analyzed resume" in caplog.text
+        assert "MongoDB connection lost" in caplog.text
+        assert "MongoDB connection lost" not in response.json()["detail"]
     
     finally:
         client.app.dependency_overrides.pop(get_current_user, None)

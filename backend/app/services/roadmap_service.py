@@ -1,5 +1,6 @@
 from copy import deepcopy
 import json
+import logging
 import os
 import re
 
@@ -12,6 +13,8 @@ from pymongo.errors import DuplicateKeyError
 
 from app.database.mongodb import db
 from app.services.gemini_service import client, MODEL_NAME
+
+logger = logging.getLogger(__name__)
 
 
 ROADMAP_PROMPT = """
@@ -145,7 +148,10 @@ def _search_learning_resources(query: str) -> list[dict]:
         return resources
 
     except Exception as e:
-        print(f"Tavily resource search error: {e}")
+        logger.warning(
+            "Tavily learning-resource search failed",
+            exc_info=True,
+        )
         return []
 
 
@@ -337,12 +343,12 @@ def generate_roadmap(
             raise ValueError("Gemini returned an empty response.")
 
     except Exception as e:
-        print(f"Gemini roadmap generation error: {e}")
+        logger.exception("Gemini roadmap generation failed")
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Unable to generate the learning roadmap."
-        )
+        ) from e
 
     # Remove Markdown code fences.
     raw_text = re.sub(
@@ -365,12 +371,12 @@ def generate_roadmap(
             raise ValueError("Roadmap must be a list.")
 
     except (json.JSONDecodeError, TypeError, ValueError) as e:
-        print(f"Roadmap JSON parsing error: {e}")
+        logger.exception("Gemini returned an invalid roadmap payload")
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Gemini returned an invalid roadmap response."
-        )
+        ) from e
 
     # Index generated content by skill name.
     generated_by_name = {}

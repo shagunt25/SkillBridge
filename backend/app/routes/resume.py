@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
 from starlette.concurrency import run_in_threadpool
 
@@ -9,6 +11,7 @@ from app.services.resume_service import save_resume_analysis
 from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/resume", tags=["resume"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/upload", response_model=ResumeUploadResponse)
@@ -39,11 +42,12 @@ async def upload_resume(
                 current_user["email"],
                 validated_analysis,
             )
-        except Exception as e:
+        except Exception as exc:
+            logger.exception("Failed to save analyzed resume")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="An internal server error occurred while saving your resume data."
-            )
+            ) from exc
 
         return {
             "message": "Resume uploaded and analyzed successfully.",

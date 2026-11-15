@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import re
 import math
 
@@ -16,6 +17,8 @@ from tenacity import (
 
 from app.schemas.resume import ResumeAnalysis
 
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -155,6 +158,7 @@ def analyze_resume_text(resume_text: str) -> dict:
         raise
 
     except Exception as exc:
+        logger.exception("Gemini resume analysis failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Gemini API request failed after retries.",
@@ -272,11 +276,7 @@ def prioritize_missing_skills(
         parsed = json.loads(raw_text)
 
     except Exception as exc:
-        print(
-            "Gemini prioritization failed:",
-            type(exc).__name__,
-            str(exc),
-        )
+        logger.exception("Gemini skill prioritization failed")
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
