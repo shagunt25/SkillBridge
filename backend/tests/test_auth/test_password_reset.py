@@ -1,7 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 import uuid
 import pytest
 from unittest.mock import patch
+from fastapi import HTTPException
 from app.database.mongodb import db
+from app.services import auth_service
+from app.services.otp_service import reset_tokens_collection, utc_now
 
 FIXED_RESET_OTP = "654321"
 OTP_GENERATE_PATH = "app.services.otp_service.generate_otp"
@@ -88,6 +93,57 @@ def test_reset_token_single_use(client, active_user):
         "new_password": "HackerPassword99!"
     })
     assert res_reset_2.status_code in [400, 401, 404]
+
+
+def test_concurrent_reset_token_use_succeeds_only_once(
+    client,
+    active_user,
+    monkeypatch,
+):
+    token = f"concurrent-{uuid.uuid4().hex}"
+    reset_tokens_collection.insert_one({
+        "reset_token": token,
+        "email": active_user["email"],
+        "expires_at": utc_now() + timedelta(minutes=10),
+        "used": False,
+    })
+
+    original_find_one = reset_tokens_collection.find_one
+    initial_reads_barrier = Barrier(2)
+    find_one_lock = Lock()
+    initial_reads = 0
+
+    def synchronized_find_one(*args, **kwargs):
+        nonlocal initial_reads
+        record = original_find_one(*args, **kwargs)
+        with find_one_lock:
+            initial_reads += 1
+            should_wait = initial_reads <= 2
+        if should_wait:
+            initial_reads_barrier.wait(timeout=5)
+        return record
+
+    monkeypatch.setattr(
+        reset_tokens_collection,
+        "find_one",
+        synchronized_find_one,
+    )
+
+    def reset_with_password(password):
+        try:
+            auth_service.reset_password(token, password)
+            return True
+        except HTTPException:
+            return False
+
+    passwords = ["FirstConcurrentPassword123!", "SecondConcurrentPassword123!"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reset_with_password, passwords))
+
+    assert results.count(True) == 1
+    assert reset_tokens_collection.find_one(
+        {"reset_token": token}
+    )["used"] is True
 
 
 # 3. SECURITY: User Enumeration Prevention on Forgot Password

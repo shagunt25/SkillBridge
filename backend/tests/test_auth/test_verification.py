@@ -1,8 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import uuid
 import pytest
+from fastapi import HTTPException
 from unittest.mock import patch
 from app.database.mongodb import db
 from datetime import datetime, timedelta
+from app.services import otp_service
 from app.services.otp_service import otp_collection
 
 FIXED_TEST_OTP = "123456"
@@ -126,6 +130,65 @@ def test_verify_email_max_attempts_exceeded(client, unverified_user):
     # Even with the correct OTP, it must now be rejected due to attempt exhaustion or lockout
     response = client.post("/api/auth/verify-email", json={"email": email, "otp": real_otp})
     assert response.status_code in [400, 401, 429]
+
+
+def test_concurrent_incorrect_otp_attempts_are_all_counted(
+    client,
+    unverified_user,
+    monkeypatch,
+):
+    email = unverified_user["email"]
+    barrier = Barrier(2)
+
+    def incorrect_password(_submitted_otp, _otp_hash):
+        barrier.wait(timeout=5)
+        return False
+
+    monkeypatch.setattr(otp_service, "verify_password", incorrect_password)
+
+    def submit_incorrect_otp():
+        with pytest.raises(HTTPException):
+            otp_service.verify_otp(email, "000000")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda _: submit_incorrect_otp(), range(2)))
+
+    record = otp_collection.find_one({
+        "email": email,
+        "purpose": "email_verification",
+    })
+    assert record["attempts"] == 2
+
+
+def test_concurrent_valid_otp_is_consumed_once(
+    client,
+    unverified_user,
+    monkeypatch,
+):
+    email = unverified_user["email"]
+    barrier = Barrier(2)
+
+    def valid_password(_submitted_otp, _otp_hash):
+        barrier.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(otp_service, "verify_password", valid_password)
+
+    def submit_valid_otp():
+        try:
+            otp_service.verify_otp(email, unverified_user["otp"])
+            return True
+        except HTTPException:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: submit_valid_otp(), range(2)))
+
+    assert results.count(True) == 1
+    assert otp_collection.find_one({
+        "email": email,
+        "purpose": "email_verification",
+    }) is None
 
 # 9. EDGE CASE: Alphabetic / Alphanumeric OTP
 def test_verify_email_alphanumeric_otp(client, unverified_user):

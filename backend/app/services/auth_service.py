@@ -96,16 +96,22 @@ def reset_password(reset_token: str, new_password: str) -> dict:
             detail="Invalid or expired reset token.",
         )
 
-    if record["used"]:
+    if record.get("used", False):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This reset token has already been used.",
         )
 
-    if utc_now() > record["expires_at"]:
+    if utc_now() >= record["expires_at"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Reset token expired. Please start over.",
+        )
+
+    if not users_collection.find_one({"email": record["email"]}):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
         )
 
     new_hash = hash_password(new_password)
@@ -113,7 +119,38 @@ def reset_password(reset_token: str, new_password: str) -> dict:
         microsecond=0
     )
 
-    users_collection.update_one(
+    token_claim = reset_tokens_collection.update_one(
+        {
+            "_id": record["_id"],
+            "used": False,
+            "expires_at": {"$gt": utc_now()},
+        },
+        {"$set": {"used": True}},
+    )
+
+    if token_claim.modified_count != 1:
+        current_record = reset_tokens_collection.find_one(
+            {"_id": record["_id"]}
+        )
+
+        if current_record and current_record.get("used", False):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This reset token has already been used.",
+            )
+
+        if current_record and utc_now() >= current_record["expires_at"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset token expired. Please start over.",
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token.",
+        )
+
+    password_update = users_collection.update_one(
         {"email": record["email"]},
         {
             "$set": {
@@ -124,10 +161,11 @@ def reset_password(reset_token: str, new_password: str) -> dict:
         },
     )
 
-    reset_tokens_collection.update_one(
-        {"reset_token": reset_token},
-        {"$set": {"used": True}},
-    )
+    if password_update.matched_count != 1:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
 
     return {
         "message": (
