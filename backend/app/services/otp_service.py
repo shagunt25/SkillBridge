@@ -7,12 +7,19 @@ import ssl
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
+from hashlib import sha256
+import math
 
 from fastapi import HTTPException, status
 
 from app.database.mongodb import db
 from app.utils.security import hash_password, verify_password
-from app.services.auth_service import users_collection
+from app.services.auth_service import (
+    claim_rate_limit_bucket,
+    users_collection,
+)
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 
 logger = logging.getLogger(__name__)
@@ -24,10 +31,20 @@ def utc_now() -> datetime:
 
 
 otp_collection = db["email_otps"]
+otp_rate_limits_collection = db["otp_rate_limits"]
 
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", 10))
 OTP_MAX_ATTEMPTS = int(os.getenv("OTP_MAX_ATTEMPTS", 5))
 OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", 60))
+OTP_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("OTP_RATE_LIMIT_WINDOW_SECONDS", 3600)
+)
+OTP_RATE_LIMIT_IP_MAX_REQUESTS = int(
+    os.getenv("OTP_RATE_LIMIT_IP_MAX_REQUESTS", 10)
+)
+OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS = int(
+    os.getenv("OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS", 5)
+)
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "smtp").strip().lower()
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
@@ -99,18 +116,128 @@ def _send_otp_email(email: str, otp: str, purpose: str) -> None:
         ) from exc
 
 
-def _check_cooldown(email: str, purpose: str):
-    existing = otp_collection.find_one({"email": email, "purpose": purpose})
+VERIFICATION_OTP_MESSAGE = (
+    "If the account exists and needs verification, a code has been sent."
+)
+PASSWORD_RESET_OTP_MESSAGE = (
+    "If an account exists, a password reset OTP has been sent."
+)
 
-    if existing:
-        elapsed = (utc_now() - existing["created_at"]).total_seconds()
 
-        if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
-            wait_time = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+def _otp_rate_limit_buckets(
+    email: str,
+    client_ip: str | None,
+    now: datetime,
+) -> list[tuple[str, int, datetime, bool]]:
+    window_start = int(now.timestamp()) // OTP_RATE_LIMIT_WINDOW_SECONDS
+    expires_at = datetime.fromtimestamp(
+        (window_start + 1) * OTP_RATE_LIMIT_WINDOW_SECONDS,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    email_hash = sha256(email.casefold().encode("utf-8")).hexdigest()
+    ip_hash = sha256(
+        (client_ip or "unknown").encode("utf-8")
+    ).hexdigest()
+
+    return [
+        (
+            sha256(f"otp-ip:{window_start}:{ip_hash}".encode()).hexdigest(),
+            OTP_RATE_LIMIT_IP_MAX_REQUESTS,
+            expires_at,
+            True,
+        ),
+        (
+            sha256(f"otp-email:{window_start}:{email_hash}".encode()).hexdigest(),
+            OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS,
+            expires_at,
+            False,
+        ),
+    ]
+
+
+def _claim_otp_request_limits(email: str, client_ip: str | None) -> bool:
+    now = utc_now()
+    for bucket_id, max_requests, expires_at, is_ip_bucket in (
+        _otp_rate_limit_buckets(email, client_ip, now)
+    ):
+        bucket = claim_rate_limit_bucket(
+            otp_rate_limits_collection,
+            bucket_id,
+            max_requests,
+            expires_at,
+        )
+        if bucket is None:
+            if not is_ip_bucket:
+                return False
+
+            retry_after = max(
+                1,
+                math.ceil(
+                    (
+                        expires_at
+                        - utc_now()
+                    ).total_seconds()
+                ),
+            )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Please wait {wait_time} seconds before requesting another code."
+                detail="Too many code requests. Please try again later.",
+                headers={"Retry-After": str(retry_after)},
             )
+
+    return True
+
+
+def _otp_cooldown_id(email: str, purpose: str) -> str:
+    key = f"otp-cooldown:{purpose}:{email.casefold()}"
+    return sha256(key.encode("utf-8")).hexdigest()
+
+
+def _claim_otp_cooldown(
+    email: str,
+    purpose: str,
+) -> datetime | None:
+    now = utc_now()
+    cooldown_until = now + timedelta(seconds=OTP_RESEND_COOLDOWN_SECONDS)
+    cooldown_id = _otp_cooldown_id(email, purpose)
+
+    try:
+        claimed = otp_rate_limits_collection.find_one_and_update(
+            {
+                "_id": cooldown_id,
+                "cooldown_until": {"$lte": now},
+            },
+            {
+                "$set": {
+                    "cooldown_until": cooldown_until,
+                    "expires_at": cooldown_until,
+                },
+                "$setOnInsert": {"attempts": 0},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        return None
+
+    return (
+        claimed["cooldown_until"]
+        if claimed is not None
+        else None
+    )
+
+
+def _release_otp_cooldown(
+    email: str,
+    purpose: str,
+    cooldown_until: datetime,
+) -> None:
+    otp_rate_limits_collection.delete_one(
+        {
+            "_id": _otp_cooldown_id(email, purpose),
+            "cooldown_until": cooldown_until,
+        }
+    )
 
 
 def _get_otp_record(email: str, purpose: str) -> dict:
@@ -198,8 +325,20 @@ def _consume_otp(record: dict, email: str, purpose: str) -> None:
         _raise_current_otp_state(email, purpose)
 
 
-def create_and_send_otp(email: str) -> dict:
-    _check_cooldown(email, "email_verification")
+def create_and_send_otp(
+    email: str,
+    client_ip: str | None = None,
+    *,
+    suppress_delivery_errors: bool = False,
+) -> dict:
+    request_allowed = _claim_otp_request_limits(email, client_ip)
+    user = users_collection.find_one({"email": email})
+    if not request_allowed or not user or user.get("email_verified", False):
+        return {"message": VERIFICATION_OTP_MESSAGE}
+
+    cooldown_until = _claim_otp_cooldown(email, "email_verification")
+    if cooldown_until is None:
+        return {"message": VERIFICATION_OTP_MESSAGE}
 
     otp = generate_otp()
     otp_hash = hash_password(otp)
@@ -222,9 +361,16 @@ def create_and_send_otp(email: str) -> dict:
         _send_otp_email(email, otp, "email_verification")
     except HTTPException:
         otp_collection.delete_one({"_id": result.inserted_id})
+        _release_otp_cooldown(
+            email,
+            "email_verification",
+            cooldown_until,
+        )
+        if suppress_delivery_errors:
+            return {"message": VERIFICATION_OTP_MESSAGE}
         raise
 
-    return {"message": "OTP sent to your email."}
+    return {"message": VERIFICATION_OTP_MESSAGE}
 
 
 def verify_otp(email: str, submitted_otp: str) -> dict:
@@ -252,15 +398,19 @@ def verify_otp(email: str, submitted_otp: str) -> dict:
     return {"message": "Email verified successfully."}
 
 
-def create_and_send_reset_otp(email: str) -> dict:
+def create_and_send_reset_otp(
+    email: str,
+    client_ip: str | None = None,
+) -> dict:
+    request_allowed = _claim_otp_request_limits(email, client_ip)
     user = users_collection.find_one({"email": email})
 
-    if not user:
-        return {
-            "message": "If an account exists, a password reset OTP has been sent."
-        }
+    if not request_allowed or not user:
+        return {"message": PASSWORD_RESET_OTP_MESSAGE}
 
-    _check_cooldown(email, "password_reset")
+    cooldown_until = _claim_otp_cooldown(email, "password_reset")
+    if cooldown_until is None:
+        return {"message": PASSWORD_RESET_OTP_MESSAGE}
 
     otp = generate_otp()
     otp_hash = hash_password(otp)
@@ -283,11 +433,10 @@ def create_and_send_reset_otp(email: str) -> dict:
         _send_otp_email(email, otp, "password_reset")
     except HTTPException:
         otp_collection.delete_one({"_id": result.inserted_id})
-        raise
+        _release_otp_cooldown(email, "password_reset", cooldown_until)
+        return {"message": PASSWORD_RESET_OTP_MESSAGE}
 
-    return {
-        "message": "If an account exists, a password reset OTP has been sent."
-    }
+    return {"message": PASSWORD_RESET_OTP_MESSAGE}
 
 
 def verify_reset_otp(email: str, submitted_otp: str) -> dict:

@@ -45,6 +45,10 @@ def test_unique_indexes_are_enforced(client):
         ("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 0),
         ("LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS", 0),
         ("LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS", -1),
+        ("OTP_RATE_LIMIT_WINDOW_SECONDS", 0),
+        ("OTP_RATE_LIMIT_IP_MAX_REQUESTS", 0),
+        ("OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS", -1),
+        ("OTP_RESEND_COOLDOWN_SECONDS", 0),
     ],
 )
 def test_invalid_required_configuration_is_rejected(
@@ -59,6 +63,10 @@ def test_invalid_required_configuration_is_rejected(
         "LOGIN_RATE_LIMIT_WINDOW_SECONDS": 900,
         "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS": 5,
         "LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS": 30,
+        "OTP_RATE_LIMIT_WINDOW_SECONDS": 3600,
+        "OTP_RATE_LIMIT_IP_MAX_REQUESTS": 10,
+        "OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS": 5,
+        "OTP_RESEND_COOLDOWN_SECONDS": 60,
     }
     for name, default in defaults.items():
         monkeypatch.setattr("app.main." + name, default)
@@ -81,4 +89,9 @@ def test_roadmap_unique_index_excludes_unowned_legacy_records(client):
 
 def test_login_rate_limit_index_expires_old_buckets(client):
     index = db.login_rate_limits.index_information()["expires_at_1"]
+    assert index["expireAfterSeconds"] == 0
+
+
+def test_otp_rate_limit_index_expires_old_buckets(client):
+    index = db.otp_rate_limits.index_information()["expires_at_1"]
     assert index["expireAfterSeconds"] == 0

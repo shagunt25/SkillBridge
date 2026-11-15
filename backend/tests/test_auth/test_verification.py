@@ -5,7 +5,7 @@ import pytest
 from fastapi import HTTPException
 from unittest.mock import Mock, patch
 from app.database.mongodb import db
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.services import otp_service
 from app.services.otp_service import otp_collection
 
@@ -96,9 +96,131 @@ def test_resend_otp_success(client, unverified_user):
 # 6. SECURITY: Account Enumeration Prevention on Resend
 def test_resend_otp_unregistered_email(client):
     """Verifies that requesting OTP for a non-existent email returns 200 to prevent user enumeration."""
-    payload = {"email": f"ghost_{uuid.uuid4().hex[:8]}@example.com"}
+    email = f"ghost_{uuid.uuid4().hex[:8]}@example.com"
+    payload = {"email": email}
     response = client.post("/api/auth/resend-verification-otp", json=payload)
     assert response.status_code == 200
+    assert response.json()["message"] == otp_service.VERIFICATION_OTP_MESSAGE
+    assert otp_collection.find_one({"email": email}) is None
+
+
+def test_resend_otp_delivery_failure_is_generic(client):
+    email = f"delivery-failure_{uuid.uuid4().hex}@example.com"
+    db.users.insert_one({
+        "email": email,
+        "email_verified": False,
+    })
+    cooldown_id = otp_service._otp_cooldown_id(
+        email,
+        "email_verification",
+    )
+    otp_service.otp_rate_limits_collection.delete_one({"_id": cooldown_id})
+
+    try:
+        unknown_response = client.post(
+            "/api/auth/resend-verification-otp",
+            json={"email": f"unknown_{uuid.uuid4().hex}@example.com"},
+        )
+        with patch(
+            "app.services.otp_service._send_otp_email",
+            side_effect=HTTPException(
+                status_code=503,
+                detail="Email delivery failed.",
+            ),
+        ):
+            delivery_failure_response = client.post(
+                "/api/auth/resend-verification-otp",
+                json={"email": email},
+            )
+
+        assert delivery_failure_response.status_code == 200
+        assert delivery_failure_response.json() == unknown_response.json()
+    finally:
+        db.users.delete_one({"email": email})
+        otp_collection.delete_many({"email": email})
+        otp_service.otp_rate_limits_collection.delete_one({"_id": cooldown_id})
+
+
+def test_otp_cooldown_claim_is_atomic(monkeypatch):
+    email = f"cooldown_{uuid.uuid4().hex}@example.com"
+    cooldown_id = otp_service._otp_cooldown_id(email, "email_verification")
+    otp_service.otp_rate_limits_collection.delete_one({"_id": cooldown_id})
+
+    try:
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            claims = list(executor.map(
+                lambda _: otp_service._claim_otp_cooldown(
+                    email,
+                    "email_verification",
+                ),
+                range(12),
+            ))
+
+        assert sum(claim is not None for claim in claims) == 1
+    finally:
+        otp_service.otp_rate_limits_collection.delete_one({"_id": cooldown_id})
+
+
+def test_otp_requests_are_limited_per_ip(client, monkeypatch):
+    monkeypatch.setattr(
+        otp_service,
+        "OTP_RATE_LIMIT_IP_MAX_REQUESTS",
+        2,
+    )
+    monkeypatch.setattr(
+        otp_service,
+        "OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS",
+        100,
+    )
+    otp_service.otp_rate_limits_collection.delete_many({})
+
+    try:
+        responses = [
+            client.post(
+                "/api/auth/resend-verification-otp",
+                json={"email": f"ip-limit-{uuid.uuid4().hex}@example.com"},
+            )
+            for _ in range(3)
+        ]
+
+        assert [response.status_code for response in responses] == [
+            200,
+            200,
+            429,
+        ]
+        assert responses[-1].headers["retry-after"].isdigit()
+    finally:
+        otp_service.otp_rate_limits_collection.delete_many({})
+
+
+def test_otp_email_limit_is_generic_and_does_not_send(client, monkeypatch):
+    email = f"email-limit-{uuid.uuid4().hex}@example.com"
+    monkeypatch.setattr(
+        otp_service,
+        "OTP_RATE_LIMIT_IP_MAX_REQUESTS",
+        100,
+    )
+    monkeypatch.setattr(
+        otp_service,
+        "OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS",
+        1,
+    )
+    otp_service.otp_rate_limits_collection.delete_many({})
+
+    try:
+        responses = [
+            client.post(
+                "/api/auth/resend-verification-otp",
+                json={"email": email},
+            )
+            for _ in range(2)
+        ]
+
+        assert [response.status_code for response in responses] == [200, 200]
+        assert responses[0].json() == responses[1].json()
+        assert otp_collection.find_one({"email": email}) is None
+    finally:
+        otp_service.otp_rate_limits_collection.delete_many({})
 
 
 # 7. EDGE CASE: Expired OTP
@@ -110,7 +232,14 @@ def test_verify_email_expired_otp(client, unverified_user):
 
     otp_collection.update_one(
         {"email": email, "purpose": "email_verification"},
-        {"$set": {"expires_at": datetime.utcnow() - timedelta(minutes=10)}}
+        {
+            "$set": {
+                "expires_at": (
+                    datetime.now(timezone.utc).replace(tzinfo=None)
+                    - timedelta(minutes=10)
+                )
+            }
+        }
     )
 
     response = client.post("/api/auth/verify-email", json={"email": email, "otp": otp})
@@ -252,16 +381,23 @@ def test_smtp_sender_uses_tls_and_sends_otp(monkeypatch):
 
 def test_failed_smtp_send_removes_unsent_otp(monkeypatch):
     email = f"smtp_failure_{uuid.uuid4().hex[:8]}@example.com"
+    db.users.insert_one({
+        "email": email,
+        "email_verified": False,
+    })
     monkeypatch.setattr(otp_service, "EMAIL_BACKEND", "smtp")
     monkeypatch.setattr(otp_service, "SMTP_USERNAME", "skillbridge@example.com")
     monkeypatch.setattr(otp_service, "SMTP_PASSWORD", "test-app-password")
     monkeypatch.setattr(otp_service.smtplib, "SMTP", Mock(side_effect=OSError))
 
-    with pytest.raises(HTTPException) as error:
-        otp_service.create_and_send_otp(email)
+    try:
+        with pytest.raises(HTTPException) as error:
+            otp_service.create_and_send_otp(email)
 
-    assert error.value.status_code == 503
-    assert otp_collection.find_one({
-        "email": email,
-        "purpose": "email_verification",
-    }) is None
+        assert error.value.status_code == 503
+        assert otp_collection.find_one({
+            "email": email,
+            "purpose": "email_verification",
+        }) is None
+    finally:
+        db.users.delete_one({"email": email})

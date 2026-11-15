@@ -252,7 +252,10 @@ def test_token_invalidated_after_password_change(client, active_user):
     assert change_res.status_code == 200
     
     # 2. Attempt to access the profile by passing the OLD token explicitly
-    profile_res = client.get("/api/users/me", cookies={"skillbridge_auth": original_token})
+    profile_res = client.get(
+        "/api/users/me",
+        headers={"Cookie": f"skillbridge_auth={original_token}"},
+    )
     
     # The backend must reject this because 'iat' < 'password_changed_at'
     assert profile_res.status_code == 401

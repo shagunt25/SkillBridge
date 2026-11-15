@@ -11,6 +11,18 @@ os.environ["EMAIL_BACKEND"] = "console"
 os.environ["MONGODB_URI"] = "mongodb://localhost:27017"
 os.environ["DATABASE_NAME"] = "skillbridge_test"
 os.environ["JWT_SECRET"] = "skillbridge-test-only-secret-not-for-production"
+os.environ["LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS"] = "1000"
+os.environ["LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS"] = "1000"
+os.environ["OTP_RATE_LIMIT_IP_MAX_REQUESTS"] = "1000"
+os.environ["OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS"] = "1000"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "filterwarnings",
+        "ignore:datetime\\.datetime\\.utcnow\\(\\) is deprecated:"
+        "DeprecationWarning:mongomock\\.helpers",
+    )
 
 # 1. Import database module first
 import app.database.mongodb as mongodb

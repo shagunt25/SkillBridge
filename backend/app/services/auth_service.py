@@ -4,8 +4,11 @@ import hashlib
 import math
 import os
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import HTTPException, status
+from pymongo import ReturnDocument
+from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
 from app.database.mongodb import db
@@ -67,19 +70,73 @@ def _login_rate_limit_buckets(
     ]
 
 
-def check_login_rate_limit(email: str, client_ip: str | None) -> None:
+def claim_rate_limit_bucket(
+    collection: Collection[dict[str, Any]],
+    bucket_id: str,
+    max_attempts: int,
+    expires_at: datetime,
+) -> dict | None:
+    query = {
+        "_id": bucket_id,
+        "attempts": {"$lt": max_attempts},
+    }
+    update = {
+        "$inc": {"attempts": 1},
+        "$setOnInsert": {"expires_at": expires_at},
+    }
+
+    try:
+        return collection.find_one_and_update(
+            query,
+            update,
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        return collection.find_one_and_update(
+            query,
+            update,
+            return_document=ReturnDocument.AFTER,
+        )
+
+
+def release_rate_limit_bucket(
+    collection: Collection[dict[str, Any]],
+    bucket_id: str,
+) -> None:
+    collection.update_one(
+        {"_id": bucket_id, "attempts": {"$gt": 0}},
+        {"$inc": {"attempts": -1}},
+    )
+    collection.delete_one({"_id": bucket_id, "attempts": 0})
+
+
+def reserve_login_attempt(email: str, client_ip: str | None) -> list[str]:
     now = datetime.now(timezone.utc)
-    for bucket_id, max_attempts, expires_at in _login_rate_limit_buckets(
-        email,
-        client_ip,
-        now,
-    ):
-        bucket = login_rate_limits_collection.find_one({"_id": bucket_id})
-        if bucket and bucket.get("attempts", 0) >= max_attempts:
+    buckets = _login_rate_limit_buckets(email, client_ip, now)
+    claimed_buckets = []
+
+    for bucket_id, max_attempts, expires_at in buckets:
+        bucket = claim_rate_limit_bucket(
+            login_rate_limits_collection,
+            bucket_id,
+            max_attempts,
+            expires_at,
+        )
+        if bucket is None:
+            for claimed_bucket_id in claimed_buckets:
+                release_rate_limit_bucket(
+                    login_rate_limits_collection,
+                    claimed_bucket_id,
+                )
+
             retry_after = max(
                 1,
                 math.ceil(
-                    (expires_at - now.replace(tzinfo=None)).total_seconds()
+                    (
+                        expires_at
+                        - datetime.now(timezone.utc).replace(tzinfo=None)
+                    ).total_seconds()
                 ),
             )
             raise HTTPException(
@@ -88,20 +145,14 @@ def check_login_rate_limit(email: str, client_ip: str | None) -> None:
                 headers={"Retry-After": str(retry_after)},
             )
 
+        claimed_buckets.append(bucket_id)
 
-def record_failed_login(email: str, client_ip: str | None) -> None:
-    for bucket_id, _, expires_at in _login_rate_limit_buckets(
-        email,
-        client_ip,
-    ):
-        login_rate_limits_collection.update_one(
-            {"_id": bucket_id},
-            {
-                "$inc": {"attempts": 1},
-                "$setOnInsert": {"expires_at": expires_at},
-            },
-            upsert=True,
-        )
+    return claimed_buckets
+
+
+def release_login_attempt(bucket_ids: list[str]) -> None:
+    for bucket_id in bucket_ids:
+        release_rate_limit_bucket(login_rate_limits_collection, bucket_id)
 
 
 def create_user(signup_data: SignupRequest) -> dict:

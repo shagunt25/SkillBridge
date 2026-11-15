@@ -154,6 +154,53 @@ def test_forgot_password_unregistered_email(client):
     assert response.status_code == 200
 
 
+def test_forgot_password_response_does_not_reveal_cooldown_or_delivery_failure(
+    client,
+    active_user,
+):
+    email = active_user["email"]
+
+    unknown_response = client.post(
+        "/api/auth/forgot-password",
+        json={"email": f"unknown_{uuid.uuid4().hex}@example.com"},
+    )
+    with patch(OTP_GENERATE_PATH, return_value=FIXED_RESET_OTP):
+        first_request = client.post(
+            "/api/auth/forgot-password",
+            json={"email": email},
+        )
+        cooldown_response = client.post(
+            "/api/auth/forgot-password",
+            json={"email": email},
+        )
+
+    assert first_request.status_code == 200
+    assert cooldown_response.status_code == 200
+    assert unknown_response.json() == cooldown_response.json()
+
+    failure_email = f"delivery-failure_{uuid.uuid4().hex}@example.com"
+    db.users.insert_one({
+        "email": failure_email,
+        "email_verified": True,
+        "password_hash": "unused",
+    })
+    with patch(
+        "app.services.otp_service._send_otp_email",
+        side_effect=HTTPException(
+            status_code=503,
+            detail="SMTP settings are incomplete.",
+        ),
+    ):
+        delivery_failure_response = client.post(
+            "/api/auth/forgot-password",
+            json={"email": failure_email},
+        )
+
+    assert delivery_failure_response.status_code == 200
+    assert delivery_failure_response.json() == unknown_response.json()
+    db.users.delete_one({"email": failure_email})
+
+
 # 4. EDGE CASE: Invalid Email Format
 def test_forgot_password_invalid_email_format(client):
     payload = {"email": "not-an-email"}
@@ -190,7 +237,7 @@ def test_reset_password_invalid_token(client):
     response = client.post("/api/auth/reset-password", json=payload)
     assert response.status_code in [400, 401, 404]
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.services.otp_service import otp_collection
 
 # 8. EDGE CASE: Expired Reset OTP
@@ -205,7 +252,14 @@ def test_verify_reset_otp_expired(client, active_user):
     # Backdate the OTP in the database (ensure the purpose matches your DB, usually 'password_reset')
     otp_collection.update_one(
         {"email": email, "purpose": "password_reset"}, 
-        {"$set": {"expires_at": datetime.utcnow() - timedelta(minutes=10)}}
+        {
+            "$set": {
+                "expires_at": (
+                    datetime.now(timezone.utc).replace(tzinfo=None)
+                    - timedelta(minutes=10)
+                )
+            }
+        }
     )
     
     response = client.post("/api/auth/verify-reset-otp", json={"email": email, "otp": FIXED_RESET_OTP})

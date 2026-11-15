@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -215,4 +216,47 @@ def test_successful_logins_do_not_consume_failure_limits(
         assert auth_service.login_rate_limits_collection.count_documents({}) == 0
     finally:
         auth_service.login_rate_limits_collection.delete_many({})
+
+
+def test_concurrent_login_attempts_cannot_exceed_reserved_limit(monkeypatch):
+    email = f"concurrent-rate-limit-{uuid4().hex}@example.com"
+    client_ip = f"192.0.2.{uuid4().int % 250 + 1}"
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS",
+        3,
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS",
+        100,
+    )
+    bucket_ids = [
+        bucket_id
+        for bucket_id, _, _ in auth_service._login_rate_limit_buckets(
+            email,
+            client_ip,
+        )
+    ]
+    auth_service.login_rate_limits_collection.delete_many(
+        {"_id": {"$in": bucket_ids}}
+    )
+
+    def reserve_attempt():
+        try:
+            return auth_service.reserve_login_attempt(email, client_ip)
+        except HTTPException as exc:
+            assert exc.status_code == 429
+            return None
+
+    try:
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            reservations = list(executor.map(lambda _: reserve_attempt(), range(12)))
+
+        accepted = [reservation for reservation in reservations if reservation]
+        assert len(accepted) == 3
+    finally:
+        auth_service.login_rate_limits_collection.delete_many(
+            {"_id": {"$in": bucket_ids}}
+        )
 

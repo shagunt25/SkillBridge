@@ -68,3 +68,7 @@ def ensure_indexes() -> None:
         "expires_at",
         expireAfterSeconds=0,
     )
+    db["otp_rate_limits"].create_index(
+        "expires_at",
+        expireAfterSeconds=0,
+    )

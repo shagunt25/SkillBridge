@@ -24,6 +24,12 @@ from app.services.auth_service import (
     LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS,
     LOGIN_RATE_LIMIT_WINDOW_SECONDS,
 )
+from app.services.otp_service import (
+    OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS,
+    OTP_RATE_LIMIT_IP_MAX_REQUESTS,
+    OTP_RATE_LIMIT_WINDOW_SECONDS,
+    OTP_RESEND_COOLDOWN_SECONDS,
+)
 from app.utils.security import JWT_SECRET
 
 
@@ -118,6 +124,14 @@ def validate_configuration() -> None:
         )
     if LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS <= 0:
         invalid_settings.append("LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS")
+    if OTP_RATE_LIMIT_WINDOW_SECONDS <= 0:
+        invalid_settings.append("OTP_RATE_LIMIT_WINDOW_SECONDS")
+    if OTP_RATE_LIMIT_IP_MAX_REQUESTS <= 0:
+        invalid_settings.append("OTP_RATE_LIMIT_IP_MAX_REQUESTS")
+    if OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS <= 0:
+        invalid_settings.append("OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS")
+    if OTP_RESEND_COOLDOWN_SECONDS <= 0:
+        invalid_settings.append("OTP_RESEND_COOLDOWN_SECONDS")
 
     if invalid_settings:
         settings = ", ".join(invalid_settings)
