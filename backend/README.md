@@ -82,7 +82,7 @@ python -m pytest -q
 
 **Note:** if the file-upload endpoint's browser file picker freezes (a known Chrome/Windows issue), test via `curl` instead:
 ```bash
-curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.pdf" -b cookies.txt
+curl -X POST "http://127.0.0.1:8000/api/resume/upload" -F "file=@C:\path\to\resume.pdf" -b cookies.txt
 ```
 
 ## What's Implemented
@@ -102,8 +102,8 @@ curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.p
 - `POST /api/users/me/change-password` â€” **requires login**. Change password while logged in, using your current password (not OTP-based, unlike forgot-password). Requires `old_password` and `new_password` in the body. Invalidates any existing login sessions â€” you'll need to log in again afterward.
 - `DELETE /api/users/me` â€” **requires login**. Permanently deletes the logged-in user's account and associated resume, target, roadmap, OTP, and password-reset records.
 
-### Resume (`/resume/*`)
-- `POST /resume/upload` â€” **requires login**. Accepts a PDF resume, extracts text, sends it to Gemini for analysis, validates the AI response, normalizes skill names, and saves the result to MongoDB linked to the logged-in user. Re-uploading replaces the previous saved analysis (upsert).
+### Resume (`/api/resume/*`)
+- `POST /api/resume/upload` â€” **requires login**. Accepts a PDF resume, extracts text, sends it to Gemini for analysis, validates the AI response, normalizes skill names, and saves the result to MongoDB linked to the logged-in user. Re-uploading replaces the previous saved analysis (upsert).
 
 - Resume uploads are limited to 5 MB, 20 pages, and 50,000 extracted text characters. Synchronous PDF extraction, Gemini requests, and MongoDB writes run in a worker thread so they do not block the async request loop.
 
@@ -115,19 +115,25 @@ Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-passwor
 
 JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€” via `POST /api/auth/reset-password` (forgot-password flow) or `POST /api/users/me/change-password` (logged-in flow) â€” the user's `password_changed_at` timestamp is updated in MongoDB. `get_current_user()` compares this against each token's `iat` on every request; any token issued *before* the most recent password change is rejected, forcing re-login. This prevents an old, possibly compromised session from remaining valid after a password change.
 
-### Target & Skill Gap Analysis (`/target/*`, `/analysis/*`)
-- `POST /target/career` — **requires login**. Submit a career goal (e.g. "Backend Developer"), Gemini returns the typically required skills for that role, saved to MongoDB
-- `POST /target/job` — **requires login**. Submit a full job description, Gemini extracts the skills mentioned or implied, saved to MongoDB
+### Target & Skill Gap Analysis (`/api/target/*`, `/api/analysis/*`)
+- `POST /api/target/career` — **requires login**. Submit a career goal (e.g. "Backend Developer"), Gemini returns the typically required skills for that role, saved to MongoDB
+- `POST /api/target/job` — **requires login**. Submit a full job description, Gemini extracts the skills mentioned or implied, saved to MongoDB
 - Submitting a genuinely different target clears the existing roadmap and progress. Equivalent roles and skill sets are compared case-insensitively and preserve the roadmap.
-- `GET /analysis/skill-gap` — **requires login**. Compares the user's saved resume skills against their saved target skills using plain Python set logic (no AI involved — fast and deterministic). Requires both a resume and a target to already be saved, otherwise returns a 404 with a clear message. Returns matched, missing, and extra skills
+- `GET /api/analysis/skill-gap` — **requires login**. Compares the user's saved resume skills against their saved target skills using plain Python set logic (no AI involved — fast and deterministic). Requires both a resume and a target to already be saved, otherwise returns a 404 with a clear message. Returns matched, missing, and extra skills
+- `GET /api/analysis/prioritized-skills` — **requires login**. Ranks the missing skills for the user's target role.
 - Resume, target, and dashboard skill comparisons normalize whitespace, punctuation, and common aliases such as `JS`/`JavaScript` and `Node.js`/`Node JS`.
 
-### Roadmap & Progress (`/roadmap/*`, `/progress/*`)
-- `POST /roadmap/generate` - generates or refreshes the authenticated user's learning roadmap.
-- `GET /progress` - retrieves the roadmap and completion percentage.
-- `PATCH /progress/update` - updates a skill and its subtopics.
-- `PATCH /progress/subtopic/update` - updates one subtopic and recalculates its skill status.
+### Roadmap & Progress (`/api/roadmap/*`, `/api/progress/*`)
+- `POST /api/roadmap/generate` - generates or refreshes the authenticated user's learning roadmap.
+- `GET /api/progress` - retrieves the roadmap and completion percentage.
+- `PATCH /api/progress/update` - updates a skill and its subtopics.
+- `PATCH /api/progress/subtopic/update` - updates one subtopic and recalculates its skill status.
 - Progress writes are retried when another request changes the roadmap at the same time. If contention persists, the API returns `409 Conflict`; refresh the progress and retry.
+
+### Dashboard (`/api/dashboard`)
+- `GET /api/dashboard` — **requires login**. Returns the user's profile, skill match summary, roadmap, and overall progress.
+
+The canonical API prefix is `/api`. The previous unprefixed target, analysis, roadmap, progress, and dashboard paths remain available as undocumented compatibility aliases; new clients should use the `/api/...` paths.
 
 ## Important Notes
 

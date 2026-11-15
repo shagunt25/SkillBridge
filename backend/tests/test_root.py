@@ -24,6 +24,25 @@ def test_read_root_method_not_allowed(client):
     assert response.status_code == 405
 
 
+def test_api_routes_are_canonical_and_legacy_paths_stay_available(client):
+    client.cookies.clear()
+
+    canonical_response = client.get("/api/progress")
+    legacy_response = client.get("/progress")
+
+    assert canonical_response.status_code == 401
+    assert legacy_response.status_code == 401
+
+    documented_paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/target/career" in documented_paths
+    assert "/api/analysis/skill-gap" in documented_paths
+    assert "/api/roadmap/generate" in documented_paths
+    assert "/api/progress" in documented_paths
+    assert "/api/dashboard" in documented_paths
+    assert "/target/career" not in documented_paths
+    assert "/progress" not in documented_paths
+
+
 def test_liveness_does_not_depend_on_database(client):
     with patch(
         "app.main.check_database_connection",

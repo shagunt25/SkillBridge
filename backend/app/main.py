@@ -185,12 +185,16 @@ app = FastAPI(title="SkillBridge AI Backend", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(resume.router)
-app.include_router(target.router)
-app.include_router(analysis.router)
-app.include_router(prioritization.router)
-app.include_router(roadmap.router)
-app.include_router(progress.router)
-app.include_router(dashboard.router)
+for router in (
+    target.router,
+    analysis.router,
+    prioritization.router,
+    roadmap.router,
+    progress.router,
+    dashboard.router,
+):
+    app.include_router(router, prefix="/api")
+    app.include_router(router, include_in_schema=False)
 
 app.add_middleware(
     CSRFOriginMiddleware,
