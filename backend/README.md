@@ -43,6 +43,22 @@ You'll need:
 - A JWT secret (generate one: `python -c "import secrets; print(secrets.token_hex(32))"`)
 - A Gemini API key (get one free at https://aistudio.google.com/app/apikey)
 
+### Configure OTP email
+
+For local development, `EMAIL_BACKEND=console` prints OTPs to the backend terminal. To send real email using a dedicated Gmail account, enable 2-Step Verification and create a Google App Password. In `backend/.env`, set:
+
+```env
+EMAIL_BACKEND=smtp
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-project-mailbox@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM_EMAIL=your-project-mailbox@gmail.com
+SMTP_FROM_NAME=SkillBridge
+```
+
+Paste the App Password without spaces. Keep it only in `backend/.env` locally and in your deployment platform's secret settings when deploying. Do not put it in source code, `.env.example`, or a Docker image. If signup email delivery fails after account creation, the account remains unverified; fix the SMTP settings and use the resend-verification endpoint.
+
 ### 5. Run the server
 ```bash
 uvicorn app.main:app --reload
@@ -101,7 +117,7 @@ JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€”
 ## Important Notes
 
 - **Passwords are hashed** with Argon2 â€” never stored in plain text
-- **Email OTPs currently print to the terminal** (no real email service connected yet) â€” check your terminal after signup/forgot-password to see the code
+- **Email delivery** uses the configured backend. With `EMAIL_BACKEND=console`, OTPs print to the terminal; use `EMAIL_BACKEND=smtp` to send them through Gmail SMTP.
 - **Sessions use HttpOnly cookies** â€” the frontend does NOT need to manually store or attach any token; the browser handles it automatically as long as requests are made with credentials included
 - **CORS**: currently allows `http://localhost:3000` (configurable via `FRONTEND_URL` in `.env`)
 

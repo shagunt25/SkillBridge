@@ -1,9 +1,13 @@
 import io
+import os
 import uuid
 import fitz
 import mongomock
 import pytest
 from fastapi.testclient import TestClient
+
+# Keep automated auth flows isolated from real email accounts.
+os.environ["EMAIL_BACKEND"] = "console"
 
 # 1. Import database module first
 import app.database.mongodb as mongodb

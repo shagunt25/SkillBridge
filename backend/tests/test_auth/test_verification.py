@@ -3,7 +3,7 @@ from threading import Barrier
 import uuid
 import pytest
 from fastapi import HTTPException
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from app.database.mongodb import db
 from datetime import datetime, timedelta
 from app.services import otp_service
@@ -214,3 +214,54 @@ def test_verify_email_already_verified(client, unverified_user):
     # 2. Re-attempt verification on the same account
     second_res = client.post("/api/auth/verify-email", json={"email": email, "otp": otp})
     assert second_res.status_code in [400, 409, 401, 404]
+
+
+def test_smtp_sender_uses_tls_and_sends_otp(monkeypatch):
+    monkeypatch.setattr(otp_service, "EMAIL_BACKEND", "smtp")
+    monkeypatch.setattr(otp_service, "SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setattr(otp_service, "SMTP_PORT", 587)
+    monkeypatch.setattr(otp_service, "SMTP_USERNAME", "skillbridge@example.com")
+    monkeypatch.setattr(otp_service, "SMTP_PASSWORD", "test-app-password")
+    monkeypatch.setattr(otp_service, "SMTP_FROM_EMAIL", "")
+    monkeypatch.setattr(otp_service, "SMTP_FROM_NAME", "SkillBridge")
+    monkeypatch.setattr(otp_service, "SMTP_TIMEOUT_SECONDS", 10)
+
+    with patch("app.services.otp_service.smtplib.SMTP") as smtp_factory:
+        otp_service._send_otp_email(
+            "student@example.com",
+            "123456",
+            "email_verification",
+        )
+
+    smtp_factory.assert_called_once_with(
+        "smtp.gmail.com",
+        587,
+        timeout=10,
+    )
+    smtp = smtp_factory.return_value.__enter__.return_value
+    smtp.starttls.assert_called_once()
+    smtp.login.assert_called_once_with(
+        "skillbridge@example.com",
+        "test-app-password",
+    )
+    message = smtp.send_message.call_args.args[0]
+    assert message["To"] == "student@example.com"
+    assert message["From"] == "SkillBridge <skillbridge@example.com>"
+    assert "123456" in message.get_content()
+
+
+def test_failed_smtp_send_removes_unsent_otp(monkeypatch):
+    email = f"smtp_failure_{uuid.uuid4().hex[:8]}@example.com"
+    monkeypatch.setattr(otp_service, "EMAIL_BACKEND", "smtp")
+    monkeypatch.setattr(otp_service, "SMTP_USERNAME", "skillbridge@example.com")
+    monkeypatch.setattr(otp_service, "SMTP_PASSWORD", "test-app-password")
+    monkeypatch.setattr(otp_service.smtplib, "SMTP", Mock(side_effect=OSError))
+
+    with pytest.raises(HTTPException) as error:
+        otp_service.create_and_send_otp(email)
+
+    assert error.value.status_code == 503
+    assert otp_collection.find_one({
+        "email": email,
+        "purpose": "email_verification",
+    }) is None
