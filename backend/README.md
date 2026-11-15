@@ -80,7 +80,7 @@ curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.p
 ### Users (`/api/users/*`)
 - `GET /api/users/me` â€” returns currently logged-in user (requires valid session cookie)
 - `POST /api/users/me/change-password` â€” **requires login**. Change password while logged in, using your current password (not OTP-based, unlike forgot-password). Requires `old_password` and `new_password` in the body. Invalidates any existing login sessions â€” you'll need to log in again afterward.
-- `DELETE /api/users/me` â€” **requires login**. Permanently deletes the logged-in user's account. Note: currently only deletes the user document itself â€” does not yet clean up associated data in other collections (known limitation, will need addressing once resume/target data collections are merged in).
+- `DELETE /api/users/me` â€” **requires login**. Permanently deletes the logged-in user's account and associated resume, target, roadmap, OTP, and password-reset records.
 
 ### Resume (`/resume/*`)
 - `POST /resume/upload` â€” **requires login**. Accepts a PDF resume, extracts text, sends it to Gemini for analysis, validates the AI response, normalizes skill names, and saves the result to MongoDB linked to the logged-in user. Re-uploading replaces the previous saved analysis (upsert).

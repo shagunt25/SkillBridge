@@ -178,6 +178,20 @@ def change_password(
 
 
 def delete_account(user_email: str) -> dict:
+    user = users_collection.find_one({"email": user_email})
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    db.resumes.delete_many({"user_email": user_email})
+    db.targets.delete_many({"user_email": user_email})
+    db.roadmaps.delete_many({"user_email": user_email})
+    db.email_otps.delete_many({"email": user_email})
+    db.password_reset_tokens.delete_many({"email": user_email})
+
     result = users_collection.delete_one({"email": user_email})
 
     if result.deleted_count == 0:

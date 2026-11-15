@@ -148,20 +148,25 @@ def test_delete_account_no_token(client):
 
 # 4. COMPLIANCE & PRIVACY: True Cascade Deletion (Orphaned Data Check)
 def test_delete_account_removes_related_data(client, active_user):
-    """Verifies that deleting an account also purges their related data (e.g., resumes)."""
+    """Verifies account deletion purges all user-owned records."""
     email = active_user["email"]
     headers = {"Authorization": f"Bearer {active_user['token']}"}
-    
-    # 1. Manually insert a mock resume/analysis record tied to this user
+
     db.resumes.insert_one({"user_email": email, "filename": "my_resume.pdf", "content": "..."})
-    
-    # 2. Delete the account
-    client.delete("/api/users/me", headers=headers)
-    
-    # 3. Verify the related data is completely purged
-    orphaned_resume = db.resumes.find_one({"user_email": email})
-    # Accept this failing if your backend hasn't implemented cascade deletion for resumes yet
-    assert orphaned_resume is None, "Related user data must be deleted to prevent orphaned records"
+    db.targets.insert_one({"user_email": email, "target_role": "Backend Developer"})
+    db.roadmaps.insert_one({"user_email": email, "target_role": "Backend Developer"})
+    db.email_otps.insert_one({"email": email, "purpose": "email_verification"})
+    db.password_reset_tokens.insert_one({"email": email, "reset_token": "test-token"})
+
+    response = client.delete("/api/users/me", headers=headers)
+    assert response.status_code == 200
+
+    assert db.resumes.find_one({"user_email": email}) is None
+    assert db.targets.find_one({"user_email": email}) is None
+    assert db.roadmaps.find_one({"user_email": email}) is None
+    assert db.email_otps.find_one({"email": email}) is None
+    assert db.password_reset_tokens.find_one({"email": email}) is None
+    assert db.users.find_one({"email": email}) is None
 
 
 # 5. EDGE CASE: Wrong HTTP Methods
