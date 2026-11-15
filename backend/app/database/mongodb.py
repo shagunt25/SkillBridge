@@ -15,20 +15,17 @@ def ensure_indexes() -> None:
     db["users"].create_index(
         "email",
         unique=True,
-        name="uq_users_email",
     )
     db["resumes"].create_index(
         "user_email",
         unique=True,
-        name="uq_resumes_user_email",
     )
     db["targets"].create_index(
         "user_email",
         unique=True,
-        name="uq_targets_user_email",
     )
     db["roadmaps"].create_index(
         "user_email",
         unique=True,
-        name="uq_roadmaps_user_email",
+        partialFilterExpression={"user_email": {"$type": "string"}},
     )
