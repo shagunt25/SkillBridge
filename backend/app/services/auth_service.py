@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
+from pymongo.errors import DuplicateKeyError
 
 from app.database.mongodb import db
 from app.models.user import User
@@ -38,7 +39,13 @@ def create_user(signup_data: SignupRequest) -> dict:
     user_dict = new_user.model_dump()
     user_dict.setdefault("session_version", 0)
 
-    users_collection.insert_one(user_dict)
+    try:
+        users_collection.insert_one(user_dict)
+    except DuplicateKeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists.",
+        ) from exc
 
     return {
         "message": "Signup successful. Please verify your email.",

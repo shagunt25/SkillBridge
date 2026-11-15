@@ -50,6 +50,8 @@ uvicorn app.main:app --reload
 
 Server runs at http://127.0.0.1:8000
 
+On startup, the backend creates unique indexes for user emails and each user's resume, target, and roadmap. If an existing database already contains duplicate values for those fields, index creation will fail; remove or reconcile duplicates before starting the updated backend.
+
 ### 6. Test the API
 Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) â€” every endpoint can be tested directly from there.
 

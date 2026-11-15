@@ -1,5 +1,8 @@
-import pytest
 import uuid
+
+import pytest
+
+from app.services import auth_service
 
 TEST_USER = {
     "name": "Automated Tester",
@@ -19,6 +22,26 @@ def test_signup_success(client):
 def test_signup_duplicate_email(client):
     response = client.post("/api/auth/signup", json=TEST_USER)
     assert response.status_code == 409
+
+
+def test_signup_duplicate_email_race_returns_conflict(client, monkeypatch):
+    email = f"race_{uuid.uuid4().hex[:8]}@example.com"
+    payload = {**TEST_USER, "email": email}
+    first_response = client.post("/api/auth/signup", json=payload)
+
+    assert first_response.status_code == 200
+
+    monkeypatch.setattr(
+        auth_service.users_collection,
+        "find_one",
+        lambda _query: None,
+    )
+    duplicate_response = client.post("/api/auth/signup", json=payload)
+
+    assert duplicate_response.status_code == 409
+    assert duplicate_response.json()["detail"] == (
+        "An account with this email already exists."
+    )
 
 # 3
 def test_signup_invalid_email_format(client):

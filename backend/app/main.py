@@ -1,7 +1,18 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from app.routes import auth, users, resume, target, analysis, prioritization, roadmap, progress, dashboard
+from app.database.mongodb import ensure_indexes
 
-app = FastAPI(title="SkillBridge AI Backend")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    ensure_indexes()
+    yield
+
+
+app = FastAPI(title="SkillBridge AI Backend", lifespan=lifespan)
 
 app.include_router(auth.router)
 app.include_router(users.router)
