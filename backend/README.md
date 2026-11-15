@@ -130,7 +130,7 @@ JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€”
 - **Passwords are hashed** with Argon2 â€” never stored in plain text
 - **Email delivery** uses the configured backend. With `EMAIL_BACKEND=console`, OTPs print to the terminal; use `EMAIL_BACKEND=smtp` to send them through Gmail SMTP.
 - **Sessions use HttpOnly cookies** â€” the frontend does NOT need to manually store or attach any token; the browser handles it automatically as long as requests are made with credentials included
-- **CORS**: currently allows `http://localhost:3000` (configurable via `FRONTEND_URL` in `.env`)
+- **CORS and CSRF**: credentialed CORS is restricted to the exact comma-separated origins in `FRONTEND_URL`. Unsafe requests validate `Origin` or `Referer`, with Fetch Metadata as a fallback; cross-site mutations are rejected.
 
 
 - **For frontend developers:** when calling these endpoints from React, include `credentials: 'include'` in fetch requests or `withCredentials: true` in Axios requests; otherwise, the browser won't send or receive the session cookie.

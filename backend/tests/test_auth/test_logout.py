@@ -1,7 +1,9 @@
 
 import uuid
 import pytest
+
 from app.database.mongodb import db
+from app.main import FRONTEND_ORIGINS
 
 
 @pytest.fixture
@@ -90,3 +92,66 @@ def test_logout_clears_cookie(client, active_user_token):
         "max-age=0" in set_cookie_header
         or "expires=" in set_cookie_header
     )
+
+
+def test_cors_preflight_allows_configured_frontend(client):
+    origin = FRONTEND_ORIGINS[0]
+    response = client.options(
+        "/api/auth/login",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
+def test_cors_preflight_rejects_unconfigured_frontend(client):
+    response = client.options(
+        "/api/auth/login",
+        headers={
+            "Origin": "https://untrusted.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_csrf_origin_guard_allows_configured_origin(client):
+    origin = FRONTEND_ORIGINS[0]
+    response = client.post("/", headers={"Origin": origin})
+
+    assert response.status_code == 405
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_csrf_origin_guard_allows_same_origin(client):
+    response = client.post(
+        "/",
+        headers={"Origin": "http://testserver"},
+    )
+
+    assert response.status_code == 405
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": "https://untrusted.example"},
+        {"Referer": "https://untrusted.example/form"},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Sec-Fetch-Site": "cross-site"},
+    ],
+)
+def test_csrf_origin_guard_rejects_cross_site_mutations(client, headers):
+    response = client.post("/", headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Cross-origin request rejected."
