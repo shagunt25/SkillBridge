@@ -8,6 +8,9 @@ from fastapi.testclient import TestClient
 
 # Keep automated auth flows isolated from real email accounts.
 os.environ["EMAIL_BACKEND"] = "console"
+os.environ["MONGODB_URI"] = "mongodb://localhost:27017"
+os.environ["DATABASE_NAME"] = "skillbridge_test"
+os.environ["JWT_SECRET"] = "skillbridge-test-only-secret-not-for-production"
 
 # 1. Import database module first
 import app.database.mongodb as mongodb

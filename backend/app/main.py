@@ -3,14 +3,23 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
+from pymongo.errors import PyMongoError
 from starlette.datastructures import Headers
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.routes import auth, users, resume, target, analysis, prioritization, roadmap, progress, dashboard
-from app.database.mongodb import ensure_indexes
+from app.database.mongodb import (
+    DATABASE_NAME,
+    MONGODB_URI,
+    check_database_connection,
+    ensure_indexes,
+    is_valid_database_name,
+    is_valid_mongodb_uri,
+)
+from app.utils.security import JWT_SECRET
 
 
 def _normalize_origin(value: str) -> str | None:
@@ -82,6 +91,28 @@ def _referer_origin(referer: str) -> str | None:
 FRONTEND_ORIGINS = _load_frontend_origins()
 
 
+def validate_configuration() -> None:
+    invalid_settings = []
+
+    if not is_valid_mongodb_uri(MONGODB_URI):
+        invalid_settings.append("MONGODB_URI")
+    if not is_valid_database_name(DATABASE_NAME):
+        invalid_settings.append("DATABASE_NAME")
+    if (
+        not JWT_SECRET
+        or JWT_SECRET.strip() != JWT_SECRET
+        or JWT_SECRET.casefold() == "your_jwt_secret_here"
+        or len(JWT_SECRET.encode("utf-8")) < 32
+    ):
+        invalid_settings.append("JWT_SECRET")
+
+    if invalid_settings:
+        settings = ", ".join(invalid_settings)
+        raise RuntimeError(
+            f"Missing or invalid required configuration: {settings}."
+        )
+
+
 class CSRFOriginMiddleware:
     def __init__(
         self,
@@ -138,6 +169,13 @@ class CSRFOriginMiddleware:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    validate_configuration()
+    try:
+        check_database_connection()
+    except PyMongoError as exc:
+        raise RuntimeError(
+            "MongoDB is unavailable during startup. Check MONGODB_URI and network access."
+        ) from exc
     ensure_indexes()
     yield
 
@@ -166,6 +204,24 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
     max_age=600,
 )
+
+
+@app.get("/health/live", tags=["health"])
+def liveness():
+    return {"status": "alive"}
+
+
+@app.get("/health/ready", tags=["health"])
+def readiness():
+    try:
+        check_database_connection()
+    except PyMongoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is unavailable.",
+        ) from exc
+
+    return {"status": "ready"}
 
 
 @app.get("/")

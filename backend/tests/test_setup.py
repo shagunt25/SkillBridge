@@ -4,6 +4,7 @@ import pytest
 from pymongo.errors import DuplicateKeyError
 
 from app.database.mongodb import db, ensure_indexes
+from app.main import validate_configuration
 
 
 def test_database_is_mocked(client):
@@ -29,6 +30,36 @@ def test_unique_indexes_are_enforced(client):
                 collection.insert_one({field: value})
         finally:
             collection.delete_many({field: value})
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("MONGODB_URI", ""),
+        ("MONGODB_URI", "https://not-mongodb.example"),
+        ("MONGODB_URI", "mongodb://localhost:not-a-port"),
+        ("DATABASE_NAME", ""),
+        ("DATABASE_NAME", "invalid/name"),
+        ("JWT_SECRET", "your_jwt_secret_here"),
+        ("JWT_SECRET", "short-secret"),
+    ],
+)
+def test_invalid_required_configuration_is_rejected(
+    monkeypatch,
+    setting,
+    value,
+):
+    defaults = {
+        "MONGODB_URI": "mongodb://localhost:27017",
+        "DATABASE_NAME": "skillbridge_test",
+        "JWT_SECRET": "skillbridge-test-only-secret-not-for-production",
+    }
+    for name, default in defaults.items():
+        monkeypatch.setattr("app.main." + name, default)
+    monkeypatch.setattr("app.main." + setting, value)
+
+    with pytest.raises(RuntimeError, match=setting):
+        validate_configuration()
 
 
 def test_unique_index_setup_is_idempotent(client):
