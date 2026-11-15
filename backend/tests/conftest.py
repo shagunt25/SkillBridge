@@ -39,9 +39,12 @@ mongodb.db = mock_db
 from app.main import app
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def client():
-    with TestClient(app) as c:
+    with TestClient(
+        app,
+        headers={"Sec-Fetch-Site": "same-origin"},
+    ) as c:
         yield c
 
 
@@ -51,7 +54,7 @@ def resume_token(client):
     unique_email = f"resume_{uuid.uuid4().hex[:8]}@example.com"
     password = "StrictTestPassword99!"
 
-    client.post(
+    signup_response = client.post(
         "/api/auth/signup",
         json={
             "name": "Resume Tester",
@@ -59,23 +62,34 @@ def resume_token(client):
             "password": password,
         },
     )
+    assert signup_response.status_code == 200
 
-    # Use mock_db directly instead of undefined 'db'
-    mock_db.users.update_one(
+    verified = mock_db.users.update_one(
         {"email": unique_email},
         {"$set": {"email_verified": True, "is_verified": True}},
     )
+    assert verified.matched_count == 1
 
     response = client.post(
         "/api/auth/login",
         json={"email": unique_email, "password": password},
     )
-    token = response.json().get("access_token") or response.json().get("token")
+    assert response.status_code == 200
+    token = client.cookies.get("skillbridge_auth")
+    assert token
 
     yield token
 
-    # Teardown
+    client.cookies.clear()
     mock_db.users.delete_one({"email": unique_email})
+    for collection_name, query in (
+        ("resumes", {"user_email": unique_email}),
+        ("targets", {"user_email": unique_email}),
+        ("roadmaps", {"user_email": unique_email}),
+        ("email_otps", {"email": unique_email}),
+        ("password_reset_tokens", {"email": unique_email}),
+    ):
+        mock_db[collection_name].delete_many(query)
 
 
 @pytest.fixture

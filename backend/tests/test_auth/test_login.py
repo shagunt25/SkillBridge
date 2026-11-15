@@ -7,44 +7,60 @@ from fastapi import HTTPException
 
 from app.database.mongodb import db
 from app.services import auth_service
+from app.utils.security import hash_password
 
 LOGIN_CREDENTIALS = {
     "email": "tester@example.com",
     "password": "StrictTestPassword99!"
 }
-# 1
-def test_login_success(client):
-    response = client.post("/api/auth/login", json=LOGIN_CREDENTIALS)
-    assert response.status_code in [200, 401, 403]
-    if response.status_code == 200:
-        data = response.json()
-        assert "token" in data or "access_token" in data
 
-# 2
-def test_login_wrong_password(client):
+@pytest.fixture
+def verified_login_user():
+    email = f"login-{uuid4().hex}@example.com"
+    password = LOGIN_CREDENTIALS["password"]
+    db.users.insert_one({
+        "name": "Login Test User",
+        "email": email,
+        "password_hash": hash_password(password),
+        "email_verified": True,
+        "session_version": 0,
+    })
+    yield {"email": email, "password": password}
+    db.users.delete_one({"email": email})
+
+
+def test_login_success(client, verified_login_user):
+    response = client.post(
+        "/api/auth/login",
+        json=verified_login_user,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"message": "Login successful"}
+    assert "skillbridge_auth=" in response.headers["set-cookie"]
+    assert "httponly" in response.headers["set-cookie"].lower()
+
+
+def test_login_wrong_password(client, verified_login_user):
     payload = {
-        "email": "tester@example.com",
+        "email": verified_login_user["email"],
         "password": "WrongPassword999!"
     }
     response = client.post("/api/auth/login", json=payload)
     assert response.status_code == 401
 
-# 3
 def test_login_unregistered_email(client):
     payload = {
         "email": "nobody@example.com",
         "password": "SomePassword123!"
     }
     response = client.post("/api/auth/login", json=payload)
-    assert response.status_code in [401, 404]
+    assert response.status_code == 401
 
-# 4
 def test_login_wrong_http_method(client):
     """Test that the API rejects incorrect HTTP methods (GET instead of POST)."""
     response = client.get("/api/auth/login") 
     assert response.status_code == 405
 
-# 5
 def test_login_missing_password(client):
     """Test that omitting a required field triggers a validation error."""
     payload = {
@@ -55,41 +71,35 @@ def test_login_missing_password(client):
     
     assert response.status_code == 422
 
-# 6
-def test_login_email_with_whitespace(client):
-    """Test that the backend strips trailing/leading spaces from emails."""
+def test_login_email_with_whitespace(client, verified_login_user):
     payload = {
-        "email": f"  {LOGIN_CREDENTIALS['email']}  ",
-        "password": LOGIN_CREDENTIALS["password"]
+        "email": f"  {verified_login_user['email']}  ",
+        "password": verified_login_user["password"]
     }
     response = client.post("/api/auth/login", json=payload)
 
-    assert response.status_code in [200, 401, 403]
+    assert response.status_code == 200
 
-# 7
-def test_login_email_case_insensitive(client):
-    """Test that the backend handles uppercase letters in the email field."""
+def test_login_email_case_insensitive(client, verified_login_user):
     payload = {
-        "email": LOGIN_CREDENTIALS["email"].upper(),
-        "password": LOGIN_CREDENTIALS["password"]
+        "email": verified_login_user["email"].upper(),
+        "password": verified_login_user["password"]
     }
     response = client.post("/api/auth/login", json=payload)
     
-    assert response.status_code in [200, 401, 403]
+    assert response.status_code == 200
 
 
-# 8
-def test_login_empty_password(client):
+def test_login_empty_password(client, verified_login_user):
     """Test that empty strings are rejected even if the field is present."""
     payload = {
-        "email": LOGIN_CREDENTIALS["email"],
+        "email": verified_login_user["email"],
         "password": ""  # Field exists, but is empty
     }
     response = client.post("/api/auth/login", json=payload)
     
-    assert response.status_code in [401,422]
+    assert response.status_code == 401
 
-# 9
 def test_login_nosql_injection(client):
     """Test that MongoDB operator injection attempts are blocked."""
     payload = {

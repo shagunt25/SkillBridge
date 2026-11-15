@@ -122,7 +122,7 @@ def test_prioritized_skills_perfect_match(client, resume_token):
         assert len(response.json()["prioritized_skills"]) == 0
 
 def test_prioritized_skills_schema_hallucination(client, resume_token):
-    """Verifies that Pydantic correctly strips or handles extra, unrequested fields from the LLM."""
+    """Unrequested top-level AI fields are excluded from the API response."""
     user_email = get_test_user_email(client)
     db.resumes.insert_one({"user_email": user_email, "skills": [{"name": "python"}]})
     db.targets.insert_one({"user_email": user_email, "target_role": "Python Developer", "required_skills": ["python", "fastapi"]})
@@ -133,10 +133,8 @@ def test_prioritized_skills_schema_hallucination(client, resume_token):
     
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_ai):
         response = client.get("/analysis/prioritized-skills")
-        # Should return 200 (stripping the field) or 502 (rejecting it), but NEVER a 500 server crash
-        assert response.status_code in [200, 502]
-        if response.status_code == 200:
-            assert "study_plan" not in response.json()
+        assert response.status_code == 200
+        assert "study_plan" not in response.json()
 
 def test_prioritized_skills_invalid_score(client, resume_token):
     """Verifies that an out-of-range Gemini score is rejected (502)."""

@@ -31,8 +31,10 @@ from app.services.otp_service import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = os.getenv("COOKIE_NAME", "skillbridge_auth")
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax")
+COOKIE_SECURE_VALUE = os.getenv("COOKIE_SECURE", "false").strip().lower()
+COOKIE_SECURE = COOKIE_SECURE_VALUE == "true"
+COOKIE_SECURE_VALUE_VALID = COOKIE_SECURE_VALUE in {"true", "false"}
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip().lower()
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", 60))
 
 

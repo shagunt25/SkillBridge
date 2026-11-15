@@ -14,7 +14,7 @@ def active_user_token(client):
 
     client.cookies.clear()
 
-    client.post(
+    signup_response = client.post(
         "/api/auth/signup",
         json={
             "name": "Logout Tester",
@@ -22,6 +22,7 @@ def active_user_token(client):
             "password": password,
         },
     )
+    assert signup_response.status_code == 200
 
     db.users.update_one(
         {"email": email},
@@ -40,7 +41,14 @@ def active_user_token(client):
             token = cookie.value
 
     assert token, "Login did not set the authentication cookie"
-    return token
+    yield token
+    client.cookies.clear()
+    db.users.delete_one({"email": email})
+    for collection_name, query in (
+        ("email_otps", {"email": email}),
+        ("password_reset_tokens", {"email": email}),
+    ):
+        db[collection_name].delete_many(query)
 
 
 def test_logout_success(client, active_user_token):
@@ -139,6 +147,15 @@ def test_csrf_origin_guard_allows_same_origin(client):
     )
 
     assert response.status_code == 405
+
+
+def test_csrf_origin_guard_rejects_missing_browser_metadata(client):
+    response = client.post(
+        "/",
+        headers={"Sec-Fetch-Site": ""},
+    )
+
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize(

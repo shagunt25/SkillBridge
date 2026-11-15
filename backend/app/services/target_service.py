@@ -4,7 +4,7 @@ import logging
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 
-from app.database.mongodb import db
+from app.database.mongodb import database_transaction, db
 from app.schemas.target import GeneratedTargetSkills
 from app.services.gemini_service import (
     MODEL_NAME,
@@ -106,26 +106,34 @@ def _normalize_target_value(value: object) -> str:
 
 
 def save_target(user_email: str, target_role: str, required_skills: list[str]) -> None:
-    existing_target = targets_collection.find_one({"user_email": user_email})
-    target_changed = (
-        existing_target is None
-        or _normalize_target_value(existing_target.get("target_role"))
-        != _normalize_target_value(target_role)
-        or canonicalize_skill_set(
-            existing_target.get("required_skills", [])
+    with database_transaction() as session:
+        existing_target = targets_collection.find_one(
+            {"user_email": user_email},
+            session=session,
         )
-        != canonicalize_skill_set(required_skills)
-    )
+        target_changed = (
+            existing_target is None
+            or _normalize_target_value(existing_target.get("target_role"))
+            != _normalize_target_value(target_role)
+            or canonicalize_skill_set(
+                existing_target.get("required_skills", [])
+            )
+            != canonicalize_skill_set(required_skills)
+        )
 
-    if target_changed:
-        roadmaps_collection.delete_many({"user_email": user_email})
+        targets_collection.update_one(
+            {"user_email": user_email},
+            {"$set": {
+                "user_email": user_email,
+                "target_role": target_role,
+                "required_skills": required_skills
+            }},
+            upsert=True,
+            session=session,
+        )
 
-    targets_collection.update_one(
-        {"user_email": user_email},
-        {"$set": {
-            "user_email": user_email,
-            "target_role": target_role,
-            "required_skills": required_skills
-        }},
-        upsert=True
-    )
+        if target_changed:
+            roadmaps_collection.delete_many(
+                {"user_email": user_email},
+                session=session,
+            )

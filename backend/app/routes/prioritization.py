@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.schemas.prioritization import PrioritizationResponse
 from app.services.analysis_service import calculate_skill_gap
 from app.services.prioritization_service import prioritize_missing_skills
+from app.services.auth_service import reserve_ai_request
 from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -27,6 +28,8 @@ def get_prioritized_skills(current_user: dict = Depends(get_current_user)):
 
     # Step 2: Generate AI-based prioritization
     try:
+        if gap["missing_skills"]:
+            reserve_ai_request(current_user["email"])
         return prioritize_missing_skills(
             gap["target_role"],
             gap["missing_skills"]

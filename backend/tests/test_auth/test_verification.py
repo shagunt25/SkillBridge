@@ -26,9 +26,12 @@ def unverified_user(client):
             "email": email,
             "password": password
         })
-        assert signup_res.status_code in [200, 201]
+        assert signup_res.status_code == 200
 
-    return {"email": email, "password": password, "otp": FIXED_TEST_OTP}
+    yield {"email": email, "password": password, "otp": FIXED_TEST_OTP}
+    db.users.delete_one({"email": email})
+    otp_collection.delete_many({"email": email})
+    otp_service.otp_rate_limits_collection.delete_many({})
 
 
 # 1. HAPPY PATH: Complete Verification Lifecycle & DB State Assertion
@@ -60,7 +63,7 @@ def test_verify_email_otp_single_use(client, unverified_user):
 
     # Second attempt with the exact same OTP - must fail
     res_second = client.post("/api/auth/verify-email", json={"email": email, "otp": otp})
-    assert res_second.status_code in [400, 401, 404]
+    assert res_second.status_code == 400
 
 
 # 3. FAILURE CASE: Incorrect OTP
@@ -71,7 +74,7 @@ def test_verify_email_invalid_otp(client, unverified_user):
         "otp": "000000"
     }
     response = client.post("/api/auth/verify-email", json=payload)
-    assert response.status_code in [400, 401]
+    assert response.status_code == 400
 
 
 # 4. FAILURE CASE: Schema Validation / Invalid OTP Length
@@ -87,10 +90,20 @@ def test_verify_email_invalid_otp_length(client, unverified_user):
 
 # 5. HAPPY PATH: Resend OTP
 def test_resend_otp_success(client, unverified_user):
-    """Verifies that resend OTP succeeds or is gracefully throttled."""
+    """Resending an eligible account sends one new verification code."""
     payload = {"email": unverified_user["email"]}
-    response = client.post("/api/auth/resend-verification-otp", json=payload)
-    assert response.status_code in [200, 429]
+    email = unverified_user["email"]
+    otp_service.otp_rate_limits_collection.delete_one({
+        "_id": otp_service._otp_cooldown_id(email, "email_verification")
+    })
+
+    with patch(
+        "app.services.otp_service._send_otp_email"
+    ) as send_email:
+        response = client.post("/api/auth/resend-verification-otp", json=payload)
+
+    assert response.status_code == 200
+    send_email.assert_called_once()
 
 
 # 6. SECURITY: Account Enumeration Prevention on Resend
@@ -195,6 +208,10 @@ def test_otp_requests_are_limited_per_ip(client, monkeypatch):
 
 def test_otp_email_limit_is_generic_and_does_not_send(client, monkeypatch):
     email = f"email-limit-{uuid.uuid4().hex}@example.com"
+    db.users.insert_one({
+        "email": email,
+        "email_verified": False,
+    })
     monkeypatch.setattr(
         otp_service,
         "OTP_RATE_LIMIT_IP_MAX_REQUESTS",
@@ -205,21 +222,31 @@ def test_otp_email_limit_is_generic_and_does_not_send(client, monkeypatch):
         "OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS",
         1,
     )
+    monkeypatch.setattr(
+        otp_service,
+        "_claim_otp_cooldown",
+        lambda *_args: otp_service.utc_now() + timedelta(seconds=30),
+    )
     otp_service.otp_rate_limits_collection.delete_many({})
 
     try:
-        responses = [
-            client.post(
-                "/api/auth/resend-verification-otp",
-                json={"email": email},
-            )
-            for _ in range(2)
-        ]
+        with patch(
+            "app.services.otp_service._send_otp_email"
+        ) as send_email:
+            responses = [
+                client.post(
+                    "/api/auth/resend-verification-otp",
+                    json={"email": email},
+                )
+                for _ in range(2)
+            ]
 
         assert [response.status_code for response in responses] == [200, 200]
         assert responses[0].json() == responses[1].json()
-        assert otp_collection.find_one({"email": email}) is None
+        send_email.assert_called_once()
     finally:
+        db.users.delete_one({"email": email})
+        otp_collection.delete_many({"email": email})
         otp_service.otp_rate_limits_collection.delete_many({})
 
 
@@ -243,7 +270,7 @@ def test_verify_email_expired_otp(client, unverified_user):
     )
 
     response = client.post("/api/auth/verify-email", json={"email": email, "otp": otp})
-    assert response.status_code in [400, 401]
+    assert response.status_code == 400
 
 
 # 8. SECURITY: Max Verification Attempts / Brute-Force Lockout
@@ -258,7 +285,7 @@ def test_verify_email_max_attempts_exceeded(client, unverified_user):
 
     # Even with the correct OTP, it must now be rejected due to attempt exhaustion or lockout
     response = client.post("/api/auth/verify-email", json={"email": email, "otp": real_otp})
-    assert response.status_code in [400, 401, 429]
+    assert response.status_code == 400
 
 
 def test_concurrent_incorrect_otp_attempts_are_all_counted(
@@ -327,7 +354,7 @@ def test_verify_email_alphanumeric_otp(client, unverified_user):
         "otp": "ABCDEF"
     }
     response = client.post("/api/auth/verify-email", json=payload)
-    assert response.status_code in [400, 401, 422]
+    assert response.status_code == 400
 
 
 # 10. EDGE CASE: Verifying an Already Verified User
@@ -342,7 +369,7 @@ def test_verify_email_already_verified(client, unverified_user):
 
     # 2. Re-attempt verification on the same account
     second_res = client.post("/api/auth/verify-email", json={"email": email, "otp": otp})
-    assert second_res.status_code in [400, 409, 401, 404]
+    assert second_res.status_code == 400
 
 
 def test_smtp_sender_uses_tls_and_sends_otp(monkeypatch):

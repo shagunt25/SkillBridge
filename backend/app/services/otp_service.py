@@ -12,7 +12,7 @@ import math
 
 from fastapi import HTTPException, status
 
-from app.database.mongodb import db
+from app.database.mongodb import database_transaction, db
 from app.utils.security import hash_password, verify_password
 from app.services.auth_service import (
     claim_rate_limit_bucket,
@@ -388,12 +388,28 @@ def verify_otp(email: str, submitted_otp: str) -> dict:
             detail="User not found."
         )
 
-    _consume_otp(record, email, purpose)
+    with database_transaction() as session:
+        otp_result = otp_collection.delete_one(
+            {
+                "_id": record["_id"],
+                "attempts": {"$lt": OTP_MAX_ATTEMPTS},
+                "expires_at": {"$gt": utc_now()},
+            },
+            session=session,
+        )
+        if otp_result.deleted_count != 1:
+            _raise_current_otp_state(email, purpose)
 
-    users_collection.update_one(
-        {"email": email},
-        {"$set": {"email_verified": True}}
-    )
+        user_result = users_collection.update_one(
+            {"email": email},
+            {"$set": {"email_verified": True}},
+            session=session,
+        )
+        if user_result.matched_count != 1:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found.",
+            )
 
     return {"message": "Email verified successfully."}
 
@@ -446,16 +462,28 @@ def verify_reset_otp(email: str, submitted_otp: str) -> dict:
     if not verify_password(submitted_otp, record["otp_hash"]):
         _record_incorrect_otp(record, email, purpose)
 
-    _consume_otp(record, email, purpose)
-
     reset_token = secrets.token_urlsafe(32)
+    with database_transaction() as session:
+        otp_result = otp_collection.delete_one(
+            {
+                "_id": record["_id"],
+                "attempts": {"$lt": OTP_MAX_ATTEMPTS},
+                "expires_at": {"$gt": utc_now()},
+            },
+            session=session,
+        )
+        if otp_result.deleted_count != 1:
+            _raise_current_otp_state(email, purpose)
 
-    reset_tokens_collection.insert_one({
-        "reset_token": reset_token,
-        "email": email,
-        "expires_at": utc_now() + timedelta(minutes=10),
-        "used": False
-    })
+        reset_tokens_collection.insert_one(
+            {
+                "reset_token": reset_token,
+                "email": email,
+                "expires_at": utc_now() + timedelta(minutes=10),
+                "used": False,
+            },
+            session=session,
+        )
 
     return {"reset_token": reset_token}
 

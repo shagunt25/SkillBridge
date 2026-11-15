@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 import jwt
 from app.database.mongodb import db
+from app.services import auth_service
 from app.utils.security import JWT_SECRET, JWT_ALGORITHM
 
 def test_submit_career_goal(client, resume_token):
@@ -207,6 +208,39 @@ def test_target_without_gemini_configuration_returns_503(client, resume_token):
         )
 
     assert response.status_code == 503
+
+
+def test_ai_requests_are_limited_per_user(client, resume_token, monkeypatch):
+    monkeypatch.setattr(
+        auth_service,
+        "AI_RATE_LIMIT_USER_MAX_REQUESTS",
+        1,
+    )
+    auth_service.ai_rate_limits_collection.delete_many({})
+
+    try:
+        with patch(
+            "app.routes.target.get_skills_for_career",
+            return_value={
+                "target_role": "Backend Developer",
+                "required_skills": ["python"],
+            },
+        ) as generate, patch("app.routes.target.save_target"):
+            first = client.post(
+                "/api/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+            second = client.post(
+                "/api/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert second.headers["retry-after"].isdigit()
+        generate.assert_called_once()
+    finally:
+        auth_service.ai_rate_limits_collection.delete_many({})
 
 
 def test_target_requests_reject_whitespace_only_input(client, resume_token):

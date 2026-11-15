@@ -70,6 +70,8 @@ On startup, the backend creates unique indexes for user emails and each user's r
 
 Startup requires a valid MongoDB URI, database name, and a non-placeholder JWT secret with at least 32 bytes. MongoDB connectivity is checked before the application starts; Gemini and Tavily keys remain optional for features that use them.
 
+The backend uses MongoDB transactions for account deletion, target changes, email verification, and password reset. Use a replica set or sharded MongoDB deployment; MongoDB Atlas satisfies this requirement.
+
 `GET /health/live` reports whether the process is running. `GET /health/ready` pings MongoDB and returns `503 Service Unavailable` when the database cannot be reached.
 
 ### 6. Test the API
@@ -77,8 +79,10 @@ Visit http://127.0.0.1:8000/docs for interactive API documentation (Swagger UI) 
 
 To run the automated backend tests from the `backend` directory:
 ```bash
-python -m pytest -q
+python -m pytest -q --cov=app --cov-report=term-missing
 ```
+
+The automated suite uses `mongomock` and mocked AI/email providers. It does not replace a deployment-level integration check against a replica-set MongoDB or real provider credentials.
 
 **Note:** if the file-upload endpoint's browser file picker freezes (a known Chrome/Windows issue), test via `curl` instead:
 ```bash
@@ -109,17 +113,19 @@ curl -X POST "http://127.0.0.1:8000/api/resume/upload" -F "file=@C:\path\to\resu
 
 ## OTP Rate Limiting
 
-Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-password` enforce a cooldown between consecutive requests, controlled by `OTP_RESEND_COOLDOWN_SECONDS` in `.env` (default: 60 seconds). Resend and reset-code requests return the same generic response during cooldown to avoid revealing whether an account exists.
+Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-password` enforce an atomic cooldown between consecutive requests, controlled by `OTP_RESEND_COOLDOWN_SECONDS` in `.env` (default: 60 seconds). Account-specific cooldown and delivery outcomes use generic responses to avoid revealing whether an account exists.
 
 `POST /api/auth/login` also limits failed attempts using MongoDB-backed counters: 5 per email/IP pair and 30 per IP in each 15-minute window by default. Configure the limits with `LOGIN_RATE_LIMIT_WINDOW_SECONDS`, `LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS`, and `LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS`. A blocked login returns `429 Too Many Requests` and a `Retry-After` header. The counters expire automatically through a MongoDB TTL index.
 
-Verification and reset-code requests are also limited to 10 per IP and 5 per email per hour by default, configurable with `OTP_RATE_LIMIT_WINDOW_SECONDS`, `OTP_RATE_LIMIT_IP_MAX_REQUESTS`, and `OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS`. The per-email resend cooldown is claimed atomically. Resend and forgot-password responses do not reveal whether an account exists or whether email delivery succeeded.
+Verification and reset-code requests are also limited to 10 per IP and 5 per email per hour by default, configurable with `OTP_RATE_LIMIT_WINDOW_SECONDS`, `OTP_RATE_LIMIT_IP_MAX_REQUESTS`, and `OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS`. An IP limit returns `429`; an email limit returns the same generic response used for unknown accounts. All counters expire through MongoDB TTL indexes.
 
-The login limiter uses the request's client IP. When running behind a reverse proxy, configure Uvicorn's forwarded-header trust only for that trusted proxy so IP-based limits use the actual client address.
+Gemini-backed operations are limited to 20 requests per authenticated user per hour by default (`AI_RATE_LIMIT_WINDOW_SECONDS` and `AI_RATE_LIMIT_USER_MAX_REQUESTS`). Roadmaps are limited to 12 subtopics per skill and at most five Tavily searches per generation.
+
+The login and OTP IP limiters use the request's client IP. When running behind a reverse proxy, configure Uvicorn's forwarded-header trust only for that trusted proxy so IP-based limits use the actual client address.
 
 ## Session Invalidation on Password Change
 
-JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€” via `POST /api/auth/reset-password` (forgot-password flow) or `POST /api/users/me/change-password` (logged-in flow) â€” the user's `password_changed_at` timestamp is updated in MongoDB. `get_current_user()` compares this against each token's `iat` on every request; any token issued *before* the most recent password change is rejected, forcing re-login. This prevents an old, possibly compromised session from remaining valid after a password change.
+JWTs include a session-version claim. Whenever a password is changed via `POST /api/auth/reset-password` or `POST /api/users/me/change-password`, the user's `session_version` increments. `get_current_user()` compares the claim against the stored version on each request, rejecting sessions issued before the password change.
 
 ### Target & Skill Gap Analysis (`/api/target/*`, `/api/analysis/*`)
 - `POST /api/target/career` — **requires login**. Submit a career goal (e.g. "Backend Developer"), Gemini returns the typically required skills for that role, saved to MongoDB
@@ -141,41 +147,24 @@ JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€”
 
 The canonical API prefix is `/api`. The previous unprefixed target, analysis, roadmap, progress, and dashboard paths remain available as undocumented compatibility aliases; new clients should use the `/api/...` paths.
 
-## Important Notes
-
-- **Passwords are hashed** with Argon2 â€” never stored in plain text
-- **Email delivery** uses the configured backend. With `EMAIL_BACKEND=console`, OTPs print to the terminal; use `EMAIL_BACKEND=smtp` to send them through Gmail SMTP.
-- **Sessions use HttpOnly cookies** â€” the frontend does NOT need to manually store or attach any token; the browser handles it automatically as long as requests are made with credentials included
-- **CORS and CSRF**: credentialed CORS is restricted to the exact comma-separated origins in `FRONTEND_URL`. Unsafe requests validate `Origin` or `Referer`, with Fetch Metadata as a fallback; cross-site mutations are rejected.
-
-
-- **For frontend developers:** when calling these endpoints from React, include `credentials: 'include'` in fetch requests or `withCredentials: true` in Axios requests; otherwise, the browser won't send or receive the session cookie.
-- **Authentication is required** for resume uploads, target submissions, and skill-gap analysis. The frontend should ensure the user is logged in or handle `401` responses gracefully.
-- **Skill-gap analysis requires both a saved resume and a saved target.** Guide users through resume upload and target selection before displaying the results.
-- **Gemini API has rate limits** on the free tier. Simultaneous testing may result in `429` errors; this is expected.
-
 ## Cookie Configuration — Local vs Production
 
-- **For frontend developers**: when calling these endpoints from React, include `credentials: 'include'` (fetch) or `withCredentials: true` (axios) on every request — otherwise the browser won't send/receive the session cookie, and login will silently fail to persist
-- **Resume uploads, target submissions, and skill-gap analysis all require authentication** — the frontend must ensure the user is logged in before showing these features, or handle the resulting 401 gracefully
-- **Skill gap analysis requires both a resume and a target to already be saved** — the frontend should guide the user through resume upload and target selection before attempting to show the skill gap view
-- **Gemini API has rate limits** on the free tier — if multiple teammates test simultaneously, you may hit `429` errors; this is expected and not a bug
+For local HTTP development, use:
 
-## Cookie Configuration — Local vs Production
-
-Look closely at these two lines in your `.env` file:
-```
-Look closely at these two lines in your `.env` file:
-
+```env
 COOKIE_SECURE=false
 COOKIE_SAMESITE=lax
 ```
 
-These settings are correct for local development. Browsers will only accept a `SameSite=None` cookie if it's sent over HTTPS (`Secure=True`). Since you're testing locally on plain HTTP (`localhost`), using `lax` and `false` is the only way to make login actually work on your laptop.
+Cross-site cookies require `COOKIE_SAMESITE=none` and `COOKIE_SECURE=true`; startup rejects `SameSite=None` without Secure. Set production values through the deployment environment, not source code.
 
-**This will break in production.** Because our architecture hosts the React frontend on Vercel and the FastAPI backend on a separate Render domain, the browser will block the auth cookie unless `COOKIE_SAMESITE=none` and `COOKIE_SECURE=true` are configured (via environment variables in each platform's dashboard) once we deploy.
+## Important Notes
 
-**Do not hardcode these values in the code** â€” they're already read from `.env` via `os.getenv(...)`, so switching between local and production just means setting different environment variables in each environment, no code changes needed.
+- Passwords are hashed with Argon2 and are never stored in plain text.
+- With `EMAIL_BACKEND=console`, OTPs are printed to the backend terminal. SMTP mode requires valid credentials at startup.
+- Browser clients must send requests with `credentials: "include"` or Axios `withCredentials: true`.
+- Credentialed CORS is restricted to exact origins in `FRONTEND_URL`. Mutating requests must include an allowed `Origin` or `Referer`, or same-origin Fetch Metadata.
+- Resume upload, target submission, and analysis endpoints require authentication. Skill-gap analysis requires both a saved resume and target.
 
 ## Folder Structure
 ```

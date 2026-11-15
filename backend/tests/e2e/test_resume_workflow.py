@@ -38,7 +38,7 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
             "password": test_password
         }
     )
-    assert signup_response.status_code in [200, 201], f"Signup Failed: {signup_response.text}"
+    assert signup_response.status_code == 200, f"Signup Failed: {signup_response.text}"
     
     # Bypass the OTP email verification step by manually activating the user in the database
     db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})

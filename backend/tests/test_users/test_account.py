@@ -12,11 +12,12 @@ def active_user(client):
     password = "StrictTestPassword99!"
     
     # Sign up
-    client.post("/api/auth/signup", json={
+    signup_response = client.post("/api/auth/signup", json={
         "name": "Account Tester", 
         "email": unique_email, 
         "password": password
     })
+    assert signup_response.status_code == 200
     
     # Manually verify
     db.users.update_one(
@@ -29,9 +30,20 @@ def active_user(client):
         "email": unique_email,
         "password": password
     })
-    
-    token = response.json().get("access_token") or response.json().get("token")
-    return {"email": unique_email, "password": password, "token": token}
+    assert response.status_code == 200
+    token = client.cookies.get("skillbridge_auth")
+    assert token
+    yield {"email": unique_email, "password": password, "token": token}
+    client.cookies.clear()
+    db.users.delete_one({"email": unique_email})
+    for collection_name, query in (
+        ("resumes", {"user_email": unique_email}),
+        ("targets", {"user_email": unique_email}),
+        ("roadmaps", {"user_email": unique_email}),
+        ("email_otps", {"email": unique_email}),
+        ("password_reset_tokens", {"email": unique_email}),
+    ):
+        db[collection_name].delete_many(query)
 
 
 # ==========================================
@@ -40,7 +52,7 @@ def active_user(client):
 
 def test_read_current_user_success(client, active_user):
     """Verifies that an authenticated user can read their own profile."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     response = client.get("/api/users/me", headers=headers)
     assert response.status_code == 200
     assert response.json()["email"] == active_user["email"]
@@ -53,7 +65,7 @@ def test_read_user_no_token(client):
 
 def test_read_user_invalid_token(client):
     """Verifies that accessing the profile with a fake/corrupted token is rejected."""
-    headers = {"Authorization": "Bearer this.is.a.fake.token"}
+    headers = {"Cookie": "skillbridge_auth=this.is.a.fake.token"}
     response = client.get("/api/users/me", headers=headers)
     assert response.status_code == 401
 
@@ -64,7 +76,7 @@ def test_read_user_invalid_token(client):
 
 def test_change_password_success(client, active_user):
     """Verifies that providing the correct old password allows updating to a new one."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     payload = {
         "old_password": active_user["password"],
         "new_password": "NewSecurePassword123!"
@@ -81,17 +93,17 @@ def test_change_password_success(client, active_user):
 
 def test_change_password_wrong_old_password(client, active_user):
     """Verifies that providing an incorrect old password blocks the update."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     payload = {
         "old_password": "WrongOldPassword123!",
         "new_password": "NewSecurePassword123!"
     }
     response = client.post("/api/users/me/change-password", headers=headers, json=payload)
-    assert response.status_code in [400, 401, 403]
+    assert response.status_code == 401
 
 def test_change_password_too_short(client, active_user):
     """Verifies that the new password strictly adheres to length constraints."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     payload = {
         "old_password": active_user["password"],
         "new_password": "short"
@@ -101,14 +113,18 @@ def test_change_password_too_short(client, active_user):
 
 def test_change_password_same_as_old(client, active_user):
     """Verifies behavior when the user tries to change the password to the exact same one."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     payload = {
         "old_password": active_user["password"],
         "new_password": active_user["password"]
     }
     response = client.post("/api/users/me/change-password", headers=headers, json=payload)
 
-    assert response.status_code in [400, 422, 200]
+    assert response.status_code == 200
+    assert client.get(
+        "/api/users/me",
+        headers={"Cookie": f"skillbridge_auth={active_user['token']}"},
+    ).status_code == 401
 
 def test_change_password_no_token(client):
     """Verifies that changing a password requires authentication."""
@@ -127,7 +143,7 @@ def test_change_password_no_token(client):
 def test_delete_account_lifecycle(client, active_user):
     """Verifies account deletion removes DB records and immediately invalidates access."""
     email = active_user["email"]
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     
     # 1. Delete the account
     del_res = client.delete("/api/users/me", headers=headers)
@@ -139,7 +155,7 @@ def test_delete_account_lifecycle(client, active_user):
     
     # 3. Token invalidation check
     read_res = client.get("/api/users/me", headers=headers)
-    assert read_res.status_code in [401, 404], "Deleted user token must no longer work"
+    assert read_res.status_code == 401, "Deleted user token must no longer work"
 
 def test_delete_account_no_token(client):
     """Verifies that deleting an account requires authentication."""
@@ -150,7 +166,7 @@ def test_delete_account_no_token(client):
 def test_delete_account_removes_related_data(client, active_user):
     """Verifies account deletion purges all user-owned records."""
     email = active_user["email"]
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
 
     db.resumes.insert_one({"user_email": email, "filename": "my_resume.pdf", "content": "..."})
     db.targets.insert_one({"user_email": email, "target_role": "Backend Developer"})
@@ -172,14 +188,14 @@ def test_delete_account_removes_related_data(client, active_user):
 # 5. EDGE CASE: Wrong HTTP Methods
 def test_read_user_wrong_method(client, active_user):
     """Verifies that sending a POST request to a GET-only profile route is rejected."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     response = client.post("/api/users/me", headers=headers)
     assert response.status_code == 405
 
 # 6. EDGE CASE: Missing Fields in Payload
 def test_change_password_missing_fields(client, active_user):
     """Verifies that requests missing required fields are rejected by Pydantic."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     
     # Missing old_password
     response1 = client.post("/api/users/me/change-password", headers=headers, json={
@@ -197,7 +213,7 @@ def test_change_password_missing_fields(client, active_user):
 # 7. SECURITY: Excessive Password Length
 def test_change_password_max_length(client, active_user):
     """Verifies that excessively long passwords are rejected to prevent bcrypt DOS/truncation."""
-    headers = {"Authorization": f"Bearer {active_user['token']}"}
+    headers = {"Cookie": f"skillbridge_auth={active_user['token']}"}
     payload = {
         "old_password": active_user["password"],
         "new_password": "A" * 100  # 100 character password

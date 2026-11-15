@@ -1,9 +1,12 @@
+import json
 from uuid import uuid4
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
+import pytest
 
 from app.database.mongodb import db
+from app.services import roadmap_service
 from app.services.roadmap_service import save_roadmap
 
 def test_generate_roadmap_success(client, resume_token):
@@ -154,7 +157,7 @@ def test_generate_roadmap_ai_crash(client, resume_token, caplog):
          patch("app.routes.roadmap.generate_roadmap", side_effect=Exception("Gemini API Timeout")):
         
         response = client.post("/roadmap/generate")
-        assert response.status_code in [500, 502]
+        assert response.status_code == 500
         assert "Failed to generate or save roadmap" in caplog.text
         assert "Gemini API Timeout" in caplog.text
 
@@ -203,3 +206,105 @@ def test_save_roadmap_advances_version_and_preserves_progress():
         assert generated_roadmap[0]["status"] == "Not Started"
     finally:
         db.roadmaps.delete_one({"user_email": user_email})
+
+
+def test_generate_roadmap_preserves_rank_and_caps_resource_searches(
+    monkeypatch,
+):
+    generated_roadmap = [
+        {
+            "skill": skill,
+            "estimated_hours": 6,
+            "subtopics": [
+                {
+                    "title": f"{skill} topic {index}",
+                    "description": "A learning topic.",
+                    "estimated_hours": 2,
+                }
+                for index in range(3)
+            ],
+        }
+        for skill in ("Python", "SQL")
+    ]
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value.text = json.dumps({
+        "roadmap": generated_roadmap,
+    })
+    monkeypatch.setattr(roadmap_service, "client", mock_client)
+
+    with patch(
+        "app.services.roadmap_service._search_learning_resources",
+        return_value=[],
+    ) as search_resources:
+        result = roadmap_service.generate_roadmap(
+            "Backend Engineer",
+            [
+                {
+                    "skill": "Python",
+                    "priority": "High",
+                    "priority_score": 90,
+                    "priority_rank": 2,
+                },
+                {
+                    "skill": "SQL",
+                    "priority": "Medium",
+                    "priority_score": 70,
+                    "priority_rank": 1,
+                },
+            ],
+        )
+
+    assert [item["skill"] for item in result["roadmap"]] == ["SQL", "Python"]
+    assert search_resources.call_count == (
+        roadmap_service.MAX_RESOURCE_SEARCHES_PER_ROADMAP
+    )
+
+
+def test_generate_roadmap_rejects_excessive_subtopics(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value.text = json.dumps({
+        "roadmap": [{
+            "skill": "Python",
+            "subtopics": [
+                {"title": f"Topic {index}"}
+                for index in range(
+                    roadmap_service.MAX_SUBTOPICS_PER_SKILL + 1
+                )
+            ],
+        }],
+    })
+    monkeypatch.setattr(roadmap_service, "client", mock_client)
+
+    with pytest.raises(HTTPException) as error:
+        roadmap_service.generate_roadmap(
+            "Backend Engineer",
+            [{
+                "skill": "Python",
+                "priority": "High",
+                "priority_score": 90,
+                "priority_rank": 1,
+            }],
+        )
+
+    assert error.value.status_code == 502
+
+
+def test_generate_roadmap_rejects_missing_skill_subtopics(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value.text = json.dumps({
+        "roadmap": [{"skill": "Python", "subtopics": []}],
+    })
+    monkeypatch.setattr(roadmap_service, "client", mock_client)
+
+    with pytest.raises(HTTPException) as error:
+        roadmap_service.generate_roadmap(
+            "Backend Engineer",
+            [{
+                "skill": "Python",
+                "priority": "High",
+                "priority_score": 90,
+                "priority_rank": 1,
+            }],
+        )
+
+    assert error.value.status_code == 502

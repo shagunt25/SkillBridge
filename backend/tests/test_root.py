@@ -8,14 +8,11 @@ from app.main import FRONTEND_ORIGINS, app, lifespan
 
 
 def test_read_root(client):
-    """Verify that GET / returns a 200 OK and expected response payload."""
     response = client.get("/")
     assert response.status_code == 200
-    
-    data = response.json()
-    assert isinstance(data, dict)
-    # Check that a standard message or status key exists
-    assert "message" in data or "status" in data
+    assert response.json() == {
+        "message": "Welcome to SkillBridge AI Backend"
+    }
 
 
 def test_read_root_method_not_allowed(client):

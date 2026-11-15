@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 from pymongo import MongoClient
@@ -46,6 +47,19 @@ def check_database_connection() -> None:
     client.admin.command("ping")
 
 
+@contextmanager
+def database_transaction():
+    try:
+        session = client.start_session()
+    except NotImplementedError:
+        yield None
+        return
+
+    with session:
+        with session.start_transaction():
+            yield session
+
+
 def ensure_indexes() -> None:
     db["users"].create_index(
         "email",
@@ -69,6 +83,18 @@ def ensure_indexes() -> None:
         expireAfterSeconds=0,
     )
     db["otp_rate_limits"].create_index(
+        "expires_at",
+        expireAfterSeconds=0,
+    )
+    db["email_otps"].create_index(
+        "expires_at",
+        expireAfterSeconds=0,
+    )
+    db["password_reset_tokens"].create_index(
+        "expires_at",
+        expireAfterSeconds=0,
+    )
+    db["ai_rate_limits"].create_index(
         "expires_at",
         expireAfterSeconds=0,
     )

@@ -66,6 +66,8 @@ Return JSON in this exact structure:
 """
 
 MAX_ROADMAP_SAVE_ATTEMPTS = 3
+MAX_SUBTOPICS_PER_SKILL = 12
+MAX_RESOURCE_SEARCHES_PER_ROADMAP = 5
 
 
 def _normalise_skill(skill: str) -> str:
@@ -403,6 +405,7 @@ def generate_roadmap(
         generated_by_name[skill_key] = item
 
     roadmap_items = []
+    resource_searches = 0
 
     # IMPORTANT:
     # Iterate through sorted_skills, not Gemini's returned order.
@@ -424,6 +427,13 @@ def generate_roadmap(
 
         if not isinstance(generated_subtopics, list):
             generated_subtopics = []
+        if len(generated_subtopics) > MAX_SUBTOPICS_PER_SKILL:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    f"Gemini generated too many subtopics for {skill_name}."
+                ),
+            )
 
         subtopics = []
 
@@ -452,9 +462,12 @@ def generate_roadmap(
             estimated_hours = max(1, estimated_hours)
 
             # Search for learning resources.
-            resources = _search_learning_resources(
-                f"{title} {skill_name} official documentation tutorial"
-            )
+            resources = []
+            if resource_searches < MAX_RESOURCE_SEARCHES_PER_ROADMAP:
+                resources = _search_learning_resources(
+                    f"{title} {skill_name} official documentation tutorial"
+                )
+                resource_searches += 1
 
             subtopics.append({
                 "title": title.strip(),

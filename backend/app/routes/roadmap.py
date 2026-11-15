@@ -5,6 +5,7 @@ from app.schemas.roadmap import RoadmapResponse
 from app.services.analysis_service import calculate_skill_gap
 from app.services.prioritization_service import prioritize_missing_skills
 from app.services.roadmap_service import generate_roadmap, save_roadmap
+from app.services.auth_service import reserve_ai_request
 from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 def generate_user_roadmap(current_user: dict = Depends(get_current_user)):
     try:
         gap = calculate_skill_gap(current_user["email"])
+
+        if gap["missing_skills"]:
+            reserve_ai_request(current_user["email"])
 
         prioritized = prioritize_missing_skills(
             gap["target_role"],

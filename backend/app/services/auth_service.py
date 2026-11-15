@@ -11,7 +11,7 @@ from pymongo import ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
-from app.database.mongodb import db
+from app.database.mongodb import database_transaction, db
 from app.models.user import User
 from app.schemas.auth import SignupRequest
 from app.utils.security import (
@@ -22,6 +22,7 @@ from app.utils.security import (
 
 users_collection = db["users"]
 login_rate_limits_collection = db["login_rate_limits"]
+ai_rate_limits_collection = db["ai_rate_limits"]
 
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(
     os.getenv("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 900)
@@ -31,6 +32,12 @@ LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS = int(
 )
 LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS = int(
     os.getenv("LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS", 30)
+)
+AI_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("AI_RATE_LIMIT_WINDOW_SECONDS", 3600)
+)
+AI_RATE_LIMIT_USER_MAX_REQUESTS = int(
+    os.getenv("AI_RATE_LIMIT_USER_MAX_REQUESTS", 20)
 )
 
 
@@ -155,6 +162,42 @@ def release_login_attempt(bucket_ids: list[str]) -> None:
         release_rate_limit_bucket(login_rate_limits_collection, bucket_id)
 
 
+def reserve_ai_request(user_email: str) -> None:
+    now = datetime.now(timezone.utc)
+    window_start = int(now.timestamp()) // AI_RATE_LIMIT_WINDOW_SECONDS
+    expires_at = datetime.fromtimestamp(
+        (window_start + 1) * AI_RATE_LIMIT_WINDOW_SECONDS,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    user_hash = hashlib.sha256(
+        user_email.casefold().encode("utf-8")
+    ).hexdigest()
+    bucket_id = hashlib.sha256(
+        f"ai:{window_start}:{user_hash}".encode()
+    ).hexdigest()
+
+    if claim_rate_limit_bucket(
+        ai_rate_limits_collection,
+        bucket_id,
+        AI_RATE_LIMIT_USER_MAX_REQUESTS,
+        expires_at,
+    ) is None:
+        retry_after = max(
+            1,
+            math.ceil(
+                (
+                    expires_at
+                    - datetime.now(timezone.utc).replace(tzinfo=None)
+                ).total_seconds()
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="AI request limit reached. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 def create_user(signup_data: SignupRequest) -> dict:
     existing_user = users_collection.find_one(
         {"email": signup_data.email}
@@ -257,53 +300,57 @@ def reset_password(reset_token: str, new_password: str) -> dict:
         microsecond=0
     )
 
-    token_claim = reset_tokens_collection.update_one(
-        {
-            "_id": record["_id"],
-            "used": False,
-            "expires_at": {"$gt": utc_now()},
-        },
-        {"$set": {"used": True}},
-    )
-
-    if token_claim.modified_count != 1:
-        current_record = reset_tokens_collection.find_one(
-            {"_id": record["_id"]}
-        )
-
-        if current_record and current_record.get("used", False):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This reset token has already been used.",
-            )
-
-        if current_record and utc_now() >= current_record["expires_at"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Reset token expired. Please start over.",
-            )
-
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token.",
-        )
-
-    password_update = users_collection.update_one(
-        {"email": record["email"]},
-        {
-            "$set": {
-                "password_hash": new_hash,
-                "password_changed_at": password_changed_at,
+    with database_transaction() as session:
+        token_claim = reset_tokens_collection.update_one(
+            {
+                "_id": record["_id"],
+                "used": False,
+                "expires_at": {"$gt": utc_now()},
             },
-            "$inc": {"session_version": 1},
-        },
-    )
-
-    if password_update.matched_count != 1:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
+            {"$set": {"used": True}},
+            session=session,
         )
+
+        if token_claim.modified_count != 1:
+            current_record = reset_tokens_collection.find_one(
+                {"_id": record["_id"]},
+                session=session,
+            )
+
+            if current_record and current_record.get("used", False):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This reset token has already been used.",
+                )
+
+            if current_record and utc_now() >= current_record["expires_at"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Reset token expired. Please start over.",
+                )
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token.",
+            )
+
+        password_update = users_collection.update_one(
+            {"email": record["email"]},
+            {
+                "$set": {
+                    "password_hash": new_hash,
+                    "password_changed_at": password_changed_at,
+                },
+                "$inc": {"session_version": 1},
+            },
+            session=session,
+        )
+
+        if password_update.matched_count != 1:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found.",
+            )
 
     return {
         "message": (
@@ -354,26 +401,34 @@ def change_password(
 
 
 def delete_account(user_email: str) -> dict:
-    user = users_collection.find_one({"email": user_email})
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
+    with database_transaction() as session:
+        result = users_collection.delete_one(
+            {"email": user_email},
+            session=session,
         )
 
-    db.resumes.delete_many({"user_email": user_email})
-    db.targets.delete_many({"user_email": user_email})
-    db.roadmaps.delete_many({"user_email": user_email})
-    db.email_otps.delete_many({"email": user_email})
-    db.password_reset_tokens.delete_many({"email": user_email})
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found.",
+            )
 
-    result = users_collection.delete_one({"email": user_email})
-
-    if result.deleted_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
+        db.resumes.delete_many(
+            {"user_email": user_email},
+            session=session,
+        )
+        db.targets.delete_many(
+            {"user_email": user_email},
+            session=session,
+        )
+        db.roadmaps.delete_many(
+            {"user_email": user_email},
+            session=session,
+        )
+        db.email_otps.delete_many({"email": user_email}, session=session)
+        db.password_reset_tokens.delete_many(
+            {"email": user_email},
+            session=session,
         )
 
     return {"message": "Account deleted successfully."}

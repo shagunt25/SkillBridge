@@ -4,9 +4,11 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from fastapi import HTTPException
+import jwt
 
 from app.database.mongodb import db
 from app.services import progress_service
+from app.utils.security import JWT_ALGORITHM, JWT_SECRET
 
 mock_progress_data = {
     "target_role": "Backend Engineer",
@@ -70,6 +72,20 @@ def test_update_progress_unauthorized(client):
     response = client.patch("/progress/update", json={"skill": "docker", "status": "Completed"})
     assert response.status_code == 401
 
+
+def test_update_subtopic_progress_unauthorized(client):
+    client.cookies.clear()
+    response = client.patch(
+        "/api/progress/subtopic/update",
+        json={
+            "skill": "Python",
+            "subtopic": "Basics",
+            "status": "Completed",
+        },
+    )
+
+    assert response.status_code == 401
+
 def test_read_progress_wrong_method(client, resume_token):
     """Verifies that sending a POST request to a GET-only route is rejected (405)."""
     response = client.post("/progress")
@@ -114,15 +130,14 @@ def test_update_progress_empty_skill(client, resume_token):
     # The service layer should reject an empty string as a non-existent skill
     with patch("app.routes.progress.update_skill_progress", side_effect=HTTPException(status_code=404, detail="Skill not found")):
         response = client.patch("/progress/update", json={"skill": "", "status": "Completed"})
-        assert response.status_code == 404
+        assert response.status_code == 422
 
 def test_update_progress_invalid_data_type(client, resume_token):
     """Verifies Pydantic handles invalid data types safely without crashing (500)."""
     # Sending a boolean and an integer instead of strings
     response = client.patch("/progress/update", json={"skill": True, "status": 123})
     
-    # Pydantic will either strictly reject (422) or coerce to strings. It must NEVER 500 crash.
-    assert response.status_code in [404, 422]
+    assert response.status_code == 422
 
 def test_update_progress_extra_payload_fields(client, resume_token):
     """Verifies Pydantic safely strips unrequested/malicious fields from the payload."""
@@ -222,6 +237,91 @@ def test_concurrent_skill_progress_updates_are_not_lost(monkeypatch):
             "Docker": "Completed",
         }
         assert saved_roadmap["progress_version"] == 2
+    finally:
+        db.roadmaps.delete_one({"user_email": user_email})
+
+
+def test_subtopic_progress_endpoint_updates_parent_status_and_percentage(
+    client,
+    resume_token,
+):
+    user_email = jwt.decode(
+        resume_token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+    )["sub"]
+    db.roadmaps.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Engineer",
+        "roadmap": [{
+            "skill": "Python",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+            "status": "Not Started",
+            "subtopics": [
+                {"title": "Basics", "status": "Not Started"},
+                {"title": "Testing", "status": "Not Started"},
+            ],
+        }],
+    })
+
+    try:
+        first = client.patch(
+            "/api/progress/subtopic/update",
+            json={
+                "skill": "python",
+                "subtopic": "basics",
+                "status": "Completed",
+            },
+        )
+        assert first.status_code == 200
+        assert first.json()["roadmap"][0]["status"] == "In Progress"
+        assert first.json()["overall_progress"] == 50
+
+        second = client.patch(
+            "/api/progress/subtopic/update",
+            json={
+                "skill": "Python",
+                "subtopic": "Testing",
+                "status": "Completed",
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["roadmap"][0]["status"] == "Completed"
+        assert second.json()["overall_progress"] == 100
+
+        reset = client.patch(
+            "/api/progress/subtopic/update",
+            json={
+                "skill": "Python",
+                "subtopic": "Basics",
+                "status": "Not Started",
+            },
+        )
+        assert reset.status_code == 200
+        assert reset.json()["roadmap"][0]["status"] == "In Progress"
+        assert reset.json()["overall_progress"] == 50
+
+        missing_subtopic = client.patch(
+            "/api/progress/subtopic/update",
+            json={
+                "skill": "Python",
+                "subtopic": "Unknown",
+                "status": "Completed",
+            },
+        )
+        assert missing_subtopic.status_code == 404
+
+        invalid_status = client.patch(
+            "/api/progress/subtopic/update",
+            json={
+                "skill": "Python",
+                "subtopic": "Basics",
+                "status": "Finished",
+            },
+        )
+        assert invalid_status.status_code == 422
     finally:
         db.roadmaps.delete_one({"user_email": user_email})
 

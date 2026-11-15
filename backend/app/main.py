@@ -20,17 +20,34 @@ from app.database.mongodb import (
     is_valid_mongodb_uri,
 )
 from app.services.auth_service import (
+    AI_RATE_LIMIT_USER_MAX_REQUESTS,
+    AI_RATE_LIMIT_WINDOW_SECONDS,
     LOGIN_RATE_LIMIT_EMAIL_IP_MAX_ATTEMPTS,
     LOGIN_RATE_LIMIT_IP_MAX_ATTEMPTS,
     LOGIN_RATE_LIMIT_WINDOW_SECONDS,
 )
 from app.services.otp_service import (
+    EMAIL_BACKEND,
+    OTP_EXPIRE_MINUTES,
     OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS,
     OTP_RATE_LIMIT_IP_MAX_REQUESTS,
     OTP_RATE_LIMIT_WINDOW_SECONDS,
+    OTP_MAX_ATTEMPTS,
     OTP_RESEND_COOLDOWN_SECONDS,
+    SMTP_FROM_EMAIL,
+    SMTP_HOST,
+    SMTP_PASSWORD,
+    SMTP_PORT,
+    SMTP_TIMEOUT_SECONDS,
+    SMTP_USERNAME,
 )
-from app.utils.security import JWT_SECRET
+from app.routes.auth import (
+    COOKIE_NAME,
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+    COOKIE_SECURE_VALUE_VALID,
+)
+from app.utils.security import JWT_EXPIRE_MINUTES, JWT_SECRET
 
 
 def _normalize_origin(value: str) -> str | None:
@@ -132,6 +149,34 @@ def validate_configuration() -> None:
         invalid_settings.append("OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS")
     if OTP_RESEND_COOLDOWN_SECONDS <= 0:
         invalid_settings.append("OTP_RESEND_COOLDOWN_SECONDS")
+    if OTP_EXPIRE_MINUTES <= 0:
+        invalid_settings.append("OTP_EXPIRE_MINUTES")
+    if OTP_MAX_ATTEMPTS <= 0:
+        invalid_settings.append("OTP_MAX_ATTEMPTS")
+    if JWT_EXPIRE_MINUTES <= 0:
+        invalid_settings.append("JWT_EXPIRE_MINUTES")
+    if AI_RATE_LIMIT_WINDOW_SECONDS <= 0:
+        invalid_settings.append("AI_RATE_LIMIT_WINDOW_SECONDS")
+    if AI_RATE_LIMIT_USER_MAX_REQUESTS <= 0:
+        invalid_settings.append("AI_RATE_LIMIT_USER_MAX_REQUESTS")
+    if not COOKIE_NAME.strip():
+        invalid_settings.append("COOKIE_NAME")
+    if COOKIE_SAMESITE.casefold() not in {"lax", "strict", "none"}:
+        invalid_settings.append("COOKIE_SAMESITE")
+    if COOKIE_SAMESITE.casefold() == "none" and not COOKIE_SECURE:
+        invalid_settings.append("COOKIE_SECURE")
+    if not COOKIE_SECURE_VALUE_VALID:
+        invalid_settings.append("COOKIE_SECURE")
+    if EMAIL_BACKEND not in {"smtp", "console"}:
+        invalid_settings.append("EMAIL_BACKEND")
+    if SMTP_TIMEOUT_SECONDS <= 0:
+        invalid_settings.append("SMTP_TIMEOUT_SECONDS")
+    if not 1 <= SMTP_PORT <= 65535:
+        invalid_settings.append("SMTP_PORT")
+    if EMAIL_BACKEND == "smtp" and not all(
+        (SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM_EMAIL or SMTP_USERNAME)
+    ):
+        invalid_settings.append("SMTP_*")
 
     if invalid_settings:
         settings = ", ".join(invalid_settings)
@@ -181,7 +226,7 @@ class CSRFOriginMiddleware:
                 allowed = source_origin in trusted_origins
             else:
                 fetch_site = headers.get("sec-fetch-site", "").lower()
-                allowed = fetch_site in {"", "same-origin", "none"}
+                allowed = fetch_site == "same-origin"
 
             if not allowed:
                 response = JSONResponse(
