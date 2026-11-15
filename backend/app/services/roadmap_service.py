@@ -492,7 +492,7 @@ def generate_roadmap(
 
 
 def save_roadmap(
-    user_id: str,
+    user_email: str,
     target_role: str,
     roadmap: list[dict]
 ) -> dict:
@@ -504,7 +504,7 @@ def save_roadmap(
     """
 
     existing_document = db.roadmaps.find_one({
-        "user_id": user_id
+        "user_email": user_email
     })
 
     existing_roadmap = []
@@ -521,13 +521,13 @@ def save_roadmap(
     )
 
     roadmap_document = {
-        "user_id": user_id,
+        "user_email": user_email,
         "target_role": target_role,
         "roadmap": roadmap
     }
 
     db.roadmaps.update_one(
-        {"user_id": user_id},
+        {"user_email": user_email},
         {"$set": roadmap_document},
         upsert=True
     )

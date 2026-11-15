@@ -23,12 +23,14 @@ def test_prioritized_skills_happy_path(client, resume_token):
     db.targets.insert_one({"user_email": user_email, "target_role": "Python Developer", "required_skills": ["python", "fastapi"]})
     
     mock_ai = MagicMock()
-    mock_ai.text = '{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "priority": "High"}]}'
+    mock_ai.text = '{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "score": 90}]}'
     
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_ai):
         response = client.get("/analysis/prioritized-skills")
         assert response.status_code == 200
         assert response.json()["prioritized_skills"][0]["skill"] == "fastapi"
+        assert response.json()["prioritized_skills"][0]["priority"] == "High"
+        assert response.json()["prioritized_skills"][0]["priority_score"] == 90
 
 def test_prioritized_skills_markdown_stripping(client, resume_token):
     """Verifies the backend correctly strips Markdown code fences from the LLM response."""
@@ -37,7 +39,7 @@ def test_prioritized_skills_markdown_stripping(client, resume_token):
     db.targets.insert_one({"user_email": user_email, "target_role": "Python Developer", "required_skills": ["python", "fastapi"]})
     
     mock_ai = MagicMock()
-    mock_ai.text = '```json\n{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "priority": "High"}]}\n```'
+    mock_ai.text = '```json\n{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "score": 90}]}\n```'
     
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_ai):
         response = client.get("/analysis/prioritized-skills")
@@ -123,7 +125,7 @@ def test_prioritized_skills_schema_hallucination(client, resume_token):
     
     mock_ai = MagicMock()
     # Simulating Gemini returning an extra "study_plan" field not in PrioritizationResponse
-    mock_ai.text = '{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "priority": "High"}], "study_plan": "Read docs"}'
+    mock_ai.text = '{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "score": 90}], "study_plan": "Read docs"}'
     
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_ai):
         response = client.get("/analysis/prioritized-skills")
@@ -132,19 +134,17 @@ def test_prioritized_skills_schema_hallucination(client, resume_token):
         if response.status_code == 200:
             assert "study_plan" not in response.json()
 
-def test_prioritized_skills_invalid_priority_enum(client, resume_token):
-    """Verifies that if the LLM hallucinates an invalid priority level, the backend catches it (502)."""
+def test_prioritized_skills_invalid_score(client, resume_token):
+    """Verifies that an out-of-range Gemini score is rejected (502)."""
     user_email = get_test_user_email(client)
     db.resumes.insert_one({"user_email": user_email, "skills": [{"name": "python"}]})
     db.targets.insert_one({"user_email": user_email, "target_role": "Python Developer", "required_skills": ["python", "fastapi"]})
     
     mock_ai = MagicMock()
-    # Simulating Gemini inventing a priority level "Crucial" instead of High/Medium/Low
-    mock_ai.text = '{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "priority": "Crucial"}]}'
+    mock_ai.text = '{"target_role": "python developer", "prioritized_skills": [{"skill": "fastapi", "score": 101}]}'
     
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_ai):
         response = client.get("/analysis/prioritized-skills")
-        # Pydantic validation should fail on the backend and trigger your LLM error handling
         assert response.status_code == 502
 
 # ---------------------------------------------------------

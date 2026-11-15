@@ -4,7 +4,13 @@ from fastapi import HTTPException
 mock_progress_data = {
     "target_role": "Backend Engineer",
     "roadmap": [
-        {"skill": "docker", "priority": "High", "status": "In Progress"}
+        {
+            "skill": "docker",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+            "status": "In Progress",
+        }
     ],
     "overall_progress": 50.0
 }
@@ -127,7 +133,13 @@ def test_read_progress_100_percent_completion(client, resume_token):
     """Verifies the response structure mathematically handles 100% completion."""
     perfect_mock = {
         "target_role": "Backend Engineer",
-        "roadmap": [{"skill": "docker", "priority": "High", "status": "Completed"}],
+        "roadmap": [{
+            "skill": "docker",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+            "status": "Completed",
+        }],
         "overall_progress": 100.0
     }
     with patch("app.routes.progress.get_progress", return_value=perfect_mock):

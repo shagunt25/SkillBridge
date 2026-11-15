@@ -107,7 +107,7 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
     # PHASE G: AI Skill Prioritization (The Final Step)
     # ---------------------------------------------------------
     mock_prioritization_ai = MagicMock()
-    mock_prioritization_ai.text = '{"target_role": "backend engineer", "prioritized_skills": [{"skill": "kubernetes", "priority": "High"}, {"skill": "aws", "priority": "Medium"}]}'
+    mock_prioritization_ai.text = '{"target_role": "backend engineer", "prioritized_skills": [{"skill": "kubernetes", "score": 90}, {"skill": "aws", "score": 65}]}'
     
     # Intercept the specific AI call made by the gemini_service for prioritization
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_prioritization_ai):
@@ -128,8 +128,20 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
     mock_roadmap_ai_result = {
         "target_role": "backend engineer", 
         "roadmap": [
-            {"skill": "kubernetes", "priority": "High", "status": "Not Started"},
-            {"skill": "aws", "priority": "Medium", "status": "Not Started"}
+            {
+                "skill": "kubernetes",
+                "priority": "High",
+                "priority_score": 90,
+                "priority_rank": 1,
+                "status": "Not Started",
+            },
+            {
+                "skill": "aws",
+                "priority": "Medium",
+                "priority_score": 65,
+                "priority_rank": 2,
+                "status": "Not Started",
+            }
         ]
     }
     

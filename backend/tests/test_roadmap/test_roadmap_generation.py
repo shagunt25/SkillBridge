@@ -7,12 +7,23 @@ def test_generate_roadmap_success(client, resume_token):
     mock_gap = {"target_role": "Backend Engineer", "missing_skills": ["docker", "aws"]}
     mock_prioritized = {
         "target_role": "Backend Engineer", 
-        "prioritized_skills": [{"skill": "docker", "priority": "High"}]
+        "prioritized_skills": [{
+            "skill": "docker",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+        }]
     }
     mock_roadmap_result = {
         "target_role": "Backend Engineer",
         "roadmap": [
-            {"skill": "docker", "priority": "High", "status": "Not Started"}
+            {
+                "skill": "docker",
+                "priority": "High",
+                "priority_score": 90,
+                "priority_rank": 1,
+                "status": "Not Started",
+            }
         ]
     }
 
@@ -68,8 +79,25 @@ def test_generate_roadmap_perfect_match(client, resume_token):
 def test_generate_roadmap_database_outage(client, resume_token):
     """Verifies that a MongoDB connection drop during the save operation is handled."""
     mock_gap = {"target_role": "Backend Engineer", "missing_skills": ["docker"]}
-    mock_prioritized = {"target_role": "Backend Engineer", "prioritized_skills": [{"skill": "docker", "priority": "High"}]}
-    mock_roadmap_result = {"target_role": "Backend Engineer", "roadmap": [{"skill": "docker", "priority": "High", "status": "Not Started"}]}
+    mock_prioritized = {
+        "target_role": "Backend Engineer",
+        "prioritized_skills": [{
+            "skill": "docker",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+        }],
+    }
+    mock_roadmap_result = {
+        "target_role": "Backend Engineer",
+        "roadmap": [{
+            "skill": "docker",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+            "status": "Not Started",
+        }],
+    }
 
     with patch("app.routes.roadmap.calculate_skill_gap", return_value=mock_gap), \
          patch("app.routes.roadmap.prioritize_missing_skills", return_value=mock_prioritized), \
@@ -103,7 +131,15 @@ def test_generate_roadmap_missing_target(client, resume_token):
 def test_generate_roadmap_ai_crash(client, resume_token):
     """Verifies handling of an upstream Gemini API timeout during roadmap generation."""
     mock_gap = {"target_role": "Backend", "missing_skills": ["aws"]}
-    mock_prioritized = {"target_role": "Backend", "prioritized_skills": [{"skill": "aws", "priority": "High"}]}
+    mock_prioritized = {
+        "target_role": "Backend",
+        "prioritized_skills": [{
+            "skill": "aws",
+            "priority": "High",
+            "priority_score": 90,
+            "priority_rank": 1,
+        }],
+    }
 
     with patch("app.routes.roadmap.calculate_skill_gap", return_value=mock_gap), \
          patch("app.routes.roadmap.prioritize_missing_skills", return_value=mock_prioritized), \
