@@ -145,11 +145,21 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
         ]
     }
     
-    # We must patch the roadmap_service directly where it is imported in the roadmap route layer
-    with patch("app.routes.roadmap.generate_roadmap", return_value=mock_roadmap_ai_result):
+    # Keep roadmap generation deterministic; prioritization was covered in Phase G.
+    with patch(
+        "app.routes.roadmap.prioritize_missing_skills",
+        return_value=prioritization_data,
+    ) as mock_prioritize, patch(
+        "app.routes.roadmap.generate_roadmap",
+        return_value=mock_roadmap_ai_result,
+    ):
         roadmap_response = client.post("/roadmap/generate")
         
     assert roadmap_response.status_code == 200, f"Roadmap Generation Failed: {roadmap_response.text}"
+    mock_prioritize.assert_called_once_with(
+        "Backend Engineer",
+        ["aws", "kubernetes"],
+    )
     
     # Verify the AI output was safely persisted in MongoDB
     saved_roadmap = db.roadmaps.find_one({"user_email": test_email})

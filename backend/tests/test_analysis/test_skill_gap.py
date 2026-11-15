@@ -179,6 +179,54 @@ def test_skill_gap_case_insensitivity(client, resume_token):
     assert data["extra_skills"] == []
 
 
+def test_skill_gap_matches_common_aliases_and_punctuation(client, resume_token):
+    user_email = get_test_user_email(client)
+    db.resumes.delete_many({"user_email": user_email})
+    db.targets.delete_many({"user_email": user_email})
+
+    db.resumes.insert_one({
+        "user_email": user_email,
+        "skills": [
+            {"name": " JS "},
+            {"name": "rest-apis"},
+            {"name": "Node.js"},
+            {"name": "C plus plus"},
+            {"name": ".NET"},
+            {"name": "Docker"},
+        ],
+    })
+    db.targets.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend",
+        "required_skills": [
+            "JavaScript",
+            "REST APIs",
+            "node js",
+            "c++",
+            "dot net",
+            "Kubernetes",
+        ],
+    })
+
+    try:
+        response = client.get("/analysis/skill-gap")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["matched_skills"] == [
+            "c++",
+            "dotnet",
+            "javascript",
+            "node.js",
+            "rest apis",
+        ]
+        assert data["missing_skills"] == ["kubernetes"]
+        assert data["extra_skills"] == ["docker"]
+    finally:
+        db.resumes.delete_many({"user_email": user_email})
+        db.targets.delete_many({"user_email": user_email})
+
+
 def test_skill_gap_corrupted_db_data(client, resume_token):
     """Verifies the engine survives missing 'name' keys in the DB without a 500 crash."""
     user_email = get_test_user_email(client)

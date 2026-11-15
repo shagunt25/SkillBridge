@@ -1,5 +1,10 @@
+from uuid import uuid4
 from unittest.mock import patch
+
 from fastapi import HTTPException
+
+from app.database.mongodb import db
+from app.services.dashboard_service import get_dashboard
 
 # A perfect dashboard where the user has completed the entire journey
 mock_full_dashboard = {
@@ -103,4 +108,48 @@ def test_read_dashboard_perfect_completion(client, resume_token):
         assert data["overall_progress"] == 100.0
         assert len(data["missing_skills"]) == 0
         assert data["roadmap"][0]["status"] == "Completed"
+
+
+def test_dashboard_uses_canonical_skill_matching():
+    user_email = f"dashboard_{uuid4().hex}@example.com"
+    db.users.insert_one({"email": user_email, "name": "Test User"})
+    db.resumes.insert_one({
+        "user_email": user_email,
+        "skills": [
+            {"name": " JS "},
+            {"name": "rest-apis"},
+            {"name": "Node.js"},
+            {"name": "C plus plus"},
+            {"name": ".NET"},
+        ],
+    })
+    db.targets.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend",
+        "required_skills": [
+            "JavaScript",
+            "REST APIs",
+            "node js",
+            "c++",
+            "dot net",
+            "Kubernetes",
+        ],
+    })
+
+    try:
+        dashboard = get_dashboard(user_email)
+
+        assert dashboard["matched_skills"] == [
+            "javascript",
+            "rest apis",
+            "node.js",
+            "c++",
+            "dotnet",
+        ]
+        assert dashboard["missing_skills"] == ["kubernetes"]
+    finally:
+        db.users.delete_one({"email": user_email})
+        db.resumes.delete_many({"user_email": user_email})
+        db.targets.delete_many({"user_email": user_email})
+        db.roadmaps.delete_many({"user_email": user_email})
 

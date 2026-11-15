@@ -114,6 +114,7 @@ JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€”
 - `POST /target/job` — **requires login**. Submit a full job description, Gemini extracts the skills mentioned or implied, saved to MongoDB
 - Submitting a genuinely different target clears the existing roadmap and progress. Equivalent roles and skill sets are compared case-insensitively and preserve the roadmap.
 - `GET /analysis/skill-gap` — **requires login**. Compares the user's saved resume skills against their saved target skills using plain Python set logic (no AI involved — fast and deterministic). Requires both a resume and a target to already be saved, otherwise returns a 404 with a clear message. Returns matched, missing, and extra skills
+- Resume, target, and dashboard skill comparisons normalize whitespace, punctuation, and common aliases such as `JS`/`JavaScript` and `Node.js`/`Node JS`.
 
 ### Roadmap & Progress (`/roadmap/*`, `/progress/*`)
 - `POST /roadmap/generate` - generates or refreshes the authenticated user's learning roadmap.

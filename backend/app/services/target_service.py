@@ -11,6 +11,7 @@ from app.services.gemini_service import (
     client,
     remove_code_fences,
 )
+from app.utils.normalization import canonicalize_skill_set
 
 logger = logging.getLogger(__name__)
 targets_collection = db["targets"]
@@ -104,24 +105,16 @@ def _normalize_target_value(value: object) -> str:
     return " ".join(value.strip().casefold().split())
 
 
-def _normalize_skill_set(skills: object) -> set[str]:
-    if not isinstance(skills, list):
-        return set()
-    return {
-        normalized
-        for skill in skills
-        if (normalized := _normalize_target_value(skill))
-    }
-
-
 def save_target(user_email: str, target_role: str, required_skills: list[str]) -> None:
     existing_target = targets_collection.find_one({"user_email": user_email})
     target_changed = (
         existing_target is None
         or _normalize_target_value(existing_target.get("target_role"))
         != _normalize_target_value(target_role)
-        or _normalize_skill_set(existing_target.get("required_skills"))
-        != _normalize_skill_set(required_skills)
+        or canonicalize_skill_set(
+            existing_target.get("required_skills", [])
+        )
+        != canonicalize_skill_set(required_skills)
     )
 
     if target_changed:

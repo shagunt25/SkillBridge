@@ -351,6 +351,54 @@ def test_target_change_invalidates_old_roadmap_and_progress(client, resume_token
         db.roadmaps.delete_many({"user_email": user_email})
 
 
+def test_equivalent_skill_alias_does_not_invalidate_roadmap(client, resume_token):
+    token = next(
+        cookie.value
+        for cookie in client.cookies.jar
+        if cookie.name == "skillbridge_auth"
+    )
+    user_email = jwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+    )["sub"]
+
+    db.targets.delete_many({"user_email": user_email})
+    db.roadmaps.delete_many({"user_email": user_email})
+    db.targets.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "required_skills": ["JavaScript", "REST APIs"],
+    })
+    db.roadmaps.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "roadmap": [{"skill": "JavaScript", "status": "Completed"}],
+    })
+
+    mock_ai_response = MagicMock()
+    mock_ai_response.text = (
+        '{"target_role": "Backend Developer", '
+        '"required_skills": ["JS", "REST-APIs"]}'
+    )
+
+    try:
+        with patch(
+            "app.services.target_service.client.models.generate_content",
+            return_value=mock_ai_response,
+        ):
+            response = client.post(
+                "/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+
+        assert response.status_code == 200
+        assert db.roadmaps.find_one({"user_email": user_email}) is not None
+    finally:
+        db.targets.delete_many({"user_email": user_email})
+        db.roadmaps.delete_many({"user_email": user_email})
+
+
 def test_target_job_description_too_large(client, resume_token):
     """Verifies that massive text payloads are rejected to prevent LLM token exhaustion."""
     massive_text = "developer " * 50000  # 50,000 words

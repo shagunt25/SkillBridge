@@ -1,18 +1,9 @@
-
 from fastapi import HTTPException, status
 from app.database.mongodb import db
+from app.utils.normalization import canonicalize_skill_set
 
 resumes_collection = db["resumes"]
 targets_collection = db["targets"]
-
-
-def normalize_skill(skill) -> str | None:
-    """Normalize a skill name and skip invalid or empty values."""
-    if not isinstance(skill, str):
-        return None
-
-    normalized = skill.strip().lower()
-    return normalized or None
 
 
 def calculate_skill_gap(user_email: str) -> dict:
@@ -30,18 +21,15 @@ def calculate_skill_gap(user_email: str) -> dict:
             detail="No target role found. Please set a target career or job description first."
         )
 
-    current_skills = {
-        normalized
+    current_skills = canonicalize_skill_set([
+        skill.get("name")
         for skill in resume.get("skills", [])
         if isinstance(skill, dict)
-        and (normalized := normalize_skill(skill.get("name"))) is not None
-    }
+    ])
 
-    required_skills = {
-        normalized
-        for skill in target.get("required_skills", [])
-        if (normalized := normalize_skill(skill)) is not None
-    }
+    required_skills = canonicalize_skill_set(
+        target.get("required_skills", [])
+    )
 
     matched = sorted(current_skills & required_skills)
     missing = sorted(required_skills - current_skills)

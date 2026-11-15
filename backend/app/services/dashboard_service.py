@@ -3,17 +3,16 @@ from fastapi import HTTPException
 
 from app.database.mongodb import db
 from app.services.progress_service import calculate_overall_progress
+from app.utils.normalization import (
+    canonicalize_skill_name,
+    canonicalize_skill_set,
+)
 
 
 users_collection = db["users"]
 resumes_collection = db["resumes"]
 targets_collection = db["targets"]
 roadmaps_collection = db["roadmaps"]
-
-
-def _normalise_skill(skill) -> str:
-    """Normalize skill names for case-insensitive matching."""
-    return skill.strip().casefold() if isinstance(skill, str) else ""
 
 
 def get_dashboard(user_email: str) -> dict:
@@ -44,22 +43,22 @@ def get_dashboard(user_email: str) -> dict:
     required_skills = target.get("required_skills", []) if target else []
 
     # Match current skills with required skills
-    current_skill_set = {
-        _normalise_skill(skill)
-        for skill in current_skills
-    }
+    current_skill_set = canonicalize_skill_set(current_skills)
 
     matched_skills = []
     missing_skills = []
+    seen_required_skills = set()
 
     for skill in required_skills:
-        if not isinstance(skill, str) or not skill.strip():
+        normalized = canonicalize_skill_name(skill)
+        if not normalized or normalized in seen_required_skills:
             continue
 
-        if _normalise_skill(skill) in current_skill_set:
-            matched_skills.append(skill)
+        seen_required_skills.add(normalized)
+        if normalized in current_skill_set:
+            matched_skills.append(normalized)
         else:
-            missing_skills.append(skill)
+            missing_skills.append(normalized)
 
     # Roadmap and progress
     roadmap_doc = roadmaps_collection.find_one(
