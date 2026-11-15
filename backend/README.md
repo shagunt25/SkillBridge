@@ -112,6 +112,7 @@ JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€”
 ### Target & Skill Gap Analysis (`/target/*`, `/analysis/*`)
 - `POST /target/career` — **requires login**. Submit a career goal (e.g. "Backend Developer"), Gemini returns the typically required skills for that role, saved to MongoDB
 - `POST /target/job` — **requires login**. Submit a full job description, Gemini extracts the skills mentioned or implied, saved to MongoDB
+- Submitting a genuinely different target clears the existing roadmap and progress. Equivalent roles and skill sets are compared case-insensitively and preserve the roadmap.
 - `GET /analysis/skill-gap` — **requires login**. Compares the user's saved resume skills against their saved target skills using plain Python set logic (no AI involved — fast and deterministic). Requires both a resume and a target to already be saved, otherwise returns a 404 with a clear message. Returns matched, missing, and extra skills
 
 ## Important Notes

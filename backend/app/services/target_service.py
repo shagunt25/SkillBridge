@@ -1,8 +1,10 @@
-import logging
 import json
+import logging
+
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 
+from app.database.mongodb import db
 from app.schemas.target import GeneratedTargetSkills
 from app.services.gemini_service import (
     MODEL_NAME,
@@ -11,6 +13,8 @@ from app.services.gemini_service import (
 )
 
 logger = logging.getLogger(__name__)
+targets_collection = db["targets"]
+roadmaps_collection = db["roadmaps"]
 
 CAREER_PROMPT = """
 You are a career skills advisor. Given a job title/career goal, return the most important, commonly required technical and professional skills for that role today.
@@ -93,12 +97,36 @@ def get_skills_for_career(target_role: str) -> dict:
 def get_skills_for_job_description(job_description: str) -> dict:
     return _call_gemini_for_skills(JOB_DESCRIPTION_PROMPT, job_description)
 
-from app.database.mongodb import db
 
-targets_collection = db["targets"]
+def _normalize_target_value(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.strip().casefold().split())
+
+
+def _normalize_skill_set(skills: object) -> set[str]:
+    if not isinstance(skills, list):
+        return set()
+    return {
+        normalized
+        for skill in skills
+        if (normalized := _normalize_target_value(skill))
+    }
 
 
 def save_target(user_email: str, target_role: str, required_skills: list[str]) -> None:
+    existing_target = targets_collection.find_one({"user_email": user_email})
+    target_changed = (
+        existing_target is None
+        or _normalize_target_value(existing_target.get("target_role"))
+        != _normalize_target_value(target_role)
+        or _normalize_skill_set(existing_target.get("required_skills"))
+        != _normalize_skill_set(required_skills)
+    )
+
+    if target_changed:
+        roadmaps_collection.delete_many({"user_email": user_email})
+
     targets_collection.update_one(
         {"user_email": user_email},
         {"$set": {

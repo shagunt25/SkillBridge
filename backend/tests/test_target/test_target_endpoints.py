@@ -279,6 +279,78 @@ def test_target_upsert_logic(client, resume_token):
     assert saved_targets[0]["target_role"] == "backend"
 
 
+def test_target_change_invalidates_old_roadmap_and_progress(client, resume_token):
+    token = next(
+        cookie.value
+        for cookie in client.cookies.jar
+        if cookie.name == "skillbridge_auth"
+    )
+    user_email = jwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+    )["sub"]
+
+    db.targets.delete_many({"user_email": user_email})
+    db.roadmaps.delete_many({"user_email": user_email})
+    db.targets.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "required_skills": ["Python", "FastAPI"],
+    })
+    db.roadmaps.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "roadmap": [
+            {"skill": "Python", "status": "Completed", "subtopics": []}
+        ],
+    })
+
+    try:
+        same_target_response = MagicMock()
+        same_target_response.text = (
+            '{"target_role": "backend developer", '
+            '"required_skills": ["python", "fastapi"]}'
+        )
+        with patch(
+            "app.services.target_service.client.models.generate_content",
+            return_value=same_target_response,
+        ):
+            same_target_result = client.post(
+                "/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+
+        assert same_target_result.status_code == 200
+        assert db.roadmaps.find_one({"user_email": user_email}) is not None
+
+        changed_target_response = MagicMock()
+        changed_target_response.text = (
+            '{"target_role": "Frontend Developer", '
+            '"required_skills": ["react", "typescript"]}'
+        )
+        with patch(
+            "app.services.target_service.client.models.generate_content",
+            return_value=changed_target_response,
+        ):
+            changed_target_result = client.post(
+                "/target/career",
+                json={"target_role": "Frontend Developer"},
+            )
+
+        assert changed_target_result.status_code == 200
+        assert db.roadmaps.find_one({"user_email": user_email}) is None
+
+        dashboard = client.get("/dashboard")
+        assert dashboard.status_code == 200
+        assert dashboard.json()["target_role"] == "Frontend Developer"
+        assert dashboard.json()["roadmap"] == []
+        assert client.get("/progress").status_code == 404
+    finally:
+        db.targets.delete_many({"user_email": user_email})
+        db.roadmaps.delete_many({"user_email": user_email})
+
+
 def test_target_job_description_too_large(client, resume_token):
     """Verifies that massive text payloads are rejected to prevent LLM token exhaustion."""
     massive_text = "developer " * 50000  # 50,000 words
