@@ -101,6 +101,8 @@ curl -X POST "http://127.0.0.1:8000/resume/upload" -F "file=@C:\path\to\resume.p
 ### Resume (`/resume/*`)
 - `POST /resume/upload` â€” **requires login**. Accepts a PDF resume, extracts text, sends it to Gemini for analysis, validates the AI response, normalizes skill names, and saves the result to MongoDB linked to the logged-in user. Re-uploading replaces the previous saved analysis (upsert).
 
+- Resume uploads are limited to 5 MB, 20 pages, and 50,000 extracted text characters. Synchronous PDF extraction, Gemini requests, and MongoDB writes run in a worker thread so they do not block the async request loop.
+
 ## OTP Rate Limiting
 
 Both `POST /api/auth/resend-verification-otp` and `POST /api/auth/forgot-password` enforce a cooldown between consecutive requests, controlled by `OTP_RESEND_COOLDOWN_SECONDS` in `.env` (default: 60 seconds). Requesting a new code before the cooldown expires returns a `429 Too Many Requests` with a message telling the user how many seconds remain.

@@ -1,11 +1,14 @@
+import asyncio
 import io
 import jwt
 import json
 import pytest
+import pymupdf as fitz
 from unittest.mock import patch
 from app.utils.dependencies import get_current_user
 from app.database.mongodb import db
 from app.utils.security import JWT_SECRET, JWT_ALGORITHM
+from app.services import pdf_service
 
 GEMINI_MOCK_PATH = "app.services.gemini_service.generate_resume_content"
 
@@ -146,6 +149,95 @@ def test_upload_resume_file_too_large(client, resume_token):
     response = client.post("/api/resume/upload", headers=headers, files=files)
     # Locked strictly to your current backend's 400 response
     assert response.status_code == 400
+
+
+def test_upload_resume_too_many_pages(client, resume_token, monkeypatch):
+    headers = {"Authorization": f"Bearer {resume_token}"}
+    monkeypatch.setattr(pdf_service, "MAX_PDF_PAGES", 1)
+
+    document = fitz.open()
+    for page_number in range(2):
+        page = document.new_page()
+        page.insert_text((72, 72), f"Resume page {page_number + 1}")
+    pdf_bytes = io.BytesIO(document.tobytes())
+    document.close()
+
+    files = {"file": ("long_resume.pdf", pdf_bytes, "application/pdf")}
+    response = client.post("/api/resume/upload", headers=headers, files=files)
+
+    assert response.status_code == 400
+    assert "too many pages" in response.json()["detail"].lower()
+
+
+def test_upload_resume_extracted_text_too_large(
+    client,
+    resume_token,
+    make_pdf,
+    monkeypatch,
+):
+    headers = {"Authorization": f"Bearer {resume_token}"}
+    monkeypatch.setattr(
+        pdf_service,
+        "MAX_EXTRACTED_TEXT_CHARACTERS",
+        20,
+    )
+    pdf = make_pdf("This resume text exceeds the test limit.")
+    files = {"file": ("long_text_resume.pdf", pdf, "application/pdf")}
+
+    with patch("app.routes.resume.analyze_resume_text") as mock_analyze:
+        response = client.post(
+            "/api/resume/upload",
+            headers=headers,
+            files=files,
+        )
+
+    assert response.status_code == 400
+    assert "text is too long" in response.json()["detail"].lower()
+    mock_analyze.assert_not_called()
+
+
+def test_upload_resume_offloads_blocking_work(
+    client,
+    resume_token,
+    make_pdf,
+):
+    headers = {"Authorization": f"Bearer {resume_token}"}
+
+    def assert_running_off_event_loop():
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+
+    def extract_text(_file_bytes):
+        assert_running_off_event_loop()
+        return "Resume text"
+
+    def analyze_resume(_text):
+        assert_running_off_event_loop()
+        return json.loads(VALID_MOCK_AI_JSON)
+
+    def save_resume(_user_email, _analysis):
+        assert_running_off_event_loop()
+
+    pdf = make_pdf("Resume text")
+    files = {"file": ("resume.pdf", pdf, "application/pdf")}
+    with patch(
+        "app.routes.resume.extract_text_from_pdf",
+        side_effect=extract_text,
+    ), patch(
+        "app.routes.resume.analyze_resume_text",
+        side_effect=analyze_resume,
+    ), patch(
+        "app.routes.resume.save_resume_analysis",
+        side_effect=save_resume,
+    ):
+        response = client.post(
+            "/api/resume/upload",
+            headers=headers,
+            files=files,
+        )
+
+    assert response.status_code == 200
+
 
 @patch(GEMINI_MOCK_PATH)
 def test_upload_resume_database_persistence_strict(mock_generate, client, make_pdf):

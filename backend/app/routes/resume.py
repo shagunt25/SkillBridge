@@ -1,4 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
+from starlette.concurrency import run_in_threadpool
+
 from app.schemas.resume import ResumeUploadResponse
 from app.services.pdf_service import validate_and_read_pdf, extract_text_from_pdf
 from app.services.gemini_service import analyze_resume_text, validate_gemini_response
@@ -16,9 +18,15 @@ async def upload_resume(
 ):
     try:
         file_bytes = await validate_and_read_pdf(file)
-        extracted_text = extract_text_from_pdf(file_bytes)
+        extracted_text = await run_in_threadpool(
+            extract_text_from_pdf,
+            file_bytes,
+        )
 
-        raw_analysis = analyze_resume_text(extracted_text)
+        raw_analysis = await run_in_threadpool(
+            analyze_resume_text,
+            extracted_text,
+        )
         raw_analysis["skills"] = normalize_skills(
             raw_analysis.get("skills", [])
         )
@@ -26,9 +34,10 @@ async def upload_resume(
         validated_analysis = validate_gemini_response(raw_analysis)
 
         try:
-            save_resume_analysis(
+            await run_in_threadpool(
+                save_resume_analysis,
                 current_user["email"],
-                validated_analysis
+                validated_analysis,
             )
         except Exception as e:
             raise HTTPException(
