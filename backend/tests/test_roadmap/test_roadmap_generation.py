@@ -1,5 +1,10 @@
+from uuid import uuid4
 from unittest.mock import patch
+
 from fastapi import HTTPException
+
+from app.database.mongodb import db
+from app.services.roadmap_service import save_roadmap
 
 def test_generate_roadmap_success(client, resume_token):
     """Verifies the roadmap generation endpoint securely chains the internal services."""
@@ -147,3 +152,49 @@ def test_generate_roadmap_ai_crash(client, resume_token):
         
         response = client.post("/roadmap/generate")
         assert response.status_code in [500, 502]
+
+
+def test_save_roadmap_advances_version_and_preserves_progress():
+    user_email = f"roadmap_{uuid4().hex}@example.com"
+    db.roadmaps.insert_one(
+        {
+            "user_email": user_email,
+            "target_role": "Backend Engineer",
+            "progress_version": 4,
+            "roadmap": [
+                {
+                    "skill": "Python",
+                    "status": "Completed",
+                    "subtopics": [
+                        {"title": "Basics", "status": "In Progress"},
+                    ],
+                },
+            ],
+        }
+    )
+    generated_roadmap = [
+        {
+            "skill": "Python",
+            "status": "Not Started",
+            "subtopics": [
+                {"title": "Basics", "status": "Not Started"},
+            ],
+        },
+    ]
+
+    try:
+        save_roadmap(
+            user_email,
+            "Backend Engineer",
+            generated_roadmap,
+        )
+
+        saved_document = db.roadmaps.find_one({"user_email": user_email})
+        saved_skill = saved_document["roadmap"][0]
+
+        assert saved_document["progress_version"] == 5
+        assert saved_skill["status"] == "Completed"
+        assert saved_skill["subtopics"][0]["status"] == "In Progress"
+        assert generated_roadmap[0]["status"] == "Not Started"
+    finally:
+        db.roadmaps.delete_one({"user_email": user_email})

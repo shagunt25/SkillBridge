@@ -1,5 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
+from uuid import uuid4
 from unittest.mock import patch
+
 from fastapi import HTTPException
+
+from app.database.mongodb import db
+from app.services import progress_service
 
 mock_progress_data = {
     "target_role": "Backend Engineer",
@@ -146,5 +153,76 @@ def test_read_progress_100_percent_completion(client, resume_token):
         response = client.get("/progress")
         assert response.status_code == 200
         assert response.json()["overall_progress"] == 100.0
+
+
+def test_concurrent_skill_progress_updates_are_not_lost(monkeypatch):
+    user_email = f"progress_{uuid4().hex}@example.com"
+    db.roadmaps.insert_one(
+        {
+            "user_email": user_email,
+            "target_role": "Backend Engineer",
+            "roadmap": [
+                {"skill": "Python", "status": "Not Started", "subtopics": []},
+                {"skill": "Docker", "status": "Not Started", "subtopics": []},
+            ],
+        }
+    )
+
+    original_get_roadmap_document = progress_service._get_roadmap_document
+    initial_reads_barrier = Barrier(2)
+    read_lock = Lock()
+    initial_read_count = 0
+
+    def synchronized_get_roadmap_document(email):
+        nonlocal initial_read_count
+        roadmap_document = original_get_roadmap_document(email)
+
+        with read_lock:
+            should_wait = initial_read_count < 2
+            initial_read_count += 1
+
+        if should_wait:
+            initial_reads_barrier.wait(timeout=5)
+
+        return roadmap_document
+
+    monkeypatch.setattr(
+        progress_service,
+        "_get_roadmap_document",
+        synchronized_get_roadmap_document,
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            updates = [
+                executor.submit(
+                    progress_service.update_skill_progress,
+                    user_email,
+                    "Python",
+                    "Completed",
+                ),
+                executor.submit(
+                    progress_service.update_skill_progress,
+                    user_email,
+                    "Docker",
+                    "Completed",
+                ),
+            ]
+            for update in updates:
+                update.result(timeout=10)
+
+        saved_roadmap = db.roadmaps.find_one({"user_email": user_email})
+        statuses = {
+            item["skill"]: item["status"]
+            for item in saved_roadmap["roadmap"]
+        }
+
+        assert statuses == {
+            "Python": "Completed",
+            "Docker": "Completed",
+        }
+        assert saved_roadmap["progress_version"] == 2
+    finally:
+        db.roadmaps.delete_one({"user_email": user_email})
 
     

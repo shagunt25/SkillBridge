@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 import os
 import re
@@ -7,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 
 from fastapi import HTTPException, status
+from pymongo.errors import DuplicateKeyError
 
 from app.database.mongodb import db
 from app.services.gemini_service import client, MODEL_NAME
@@ -59,6 +61,8 @@ Return JSON in this exact structure:
     ]
 }}
 """
+
+MAX_ROADMAP_SAVE_ATTEMPTS = 3
 
 
 def _normalise_skill(skill: str) -> str:
@@ -503,33 +507,75 @@ def save_roadmap(
     a 'roadmaps' collection and stores one roadmap per user.
     """
 
-    existing_document = db.roadmaps.find_one({
-        "user_email": user_email
-    })
+    observed_existing_document = False
+    for _ in range(MAX_ROADMAP_SAVE_ATTEMPTS):
+        existing_document = db.roadmaps.find_one({
+            "user_email": user_email
+        })
 
-    existing_roadmap = []
+        if existing_document is None:
+            if observed_existing_document:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Roadmap changed concurrently. Please retry generation.",
+                )
 
-    if existing_document:
-        existing_roadmap = existing_document.get(
-            "roadmap",
-            []
+            roadmap_document = {
+                "user_email": user_email,
+                "target_role": target_role,
+                "roadmap": _preserve_roadmap_progress(
+                    deepcopy(roadmap),
+                    [],
+                ),
+                "progress_version": 1,
+            }
+
+            try:
+                db.roadmaps.insert_one(roadmap_document)
+            except DuplicateKeyError:
+                continue
+
+            return roadmap_document
+
+        observed_existing_document = True
+        existing_roadmap = existing_document.get("roadmap", [])
+        roadmap_with_progress = _preserve_roadmap_progress(
+            deepcopy(roadmap),
+            existing_roadmap,
+        )
+        roadmap_document = {
+            "user_email": user_email,
+            "target_role": target_role,
+            "roadmap": roadmap_with_progress,
+        }
+
+        version_filter = {}
+        if "progress_version" in existing_document:
+            version = existing_document["progress_version"]
+            if not isinstance(version, int) or isinstance(version, bool):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Roadmap progress version is invalid.",
+                )
+            version_filter["progress_version"] = version
+        else:
+            version_filter["progress_version"] = {"$exists": False}
+
+        result = db.roadmaps.update_one(
+            {
+                "user_email": user_email,
+                **version_filter,
+            },
+            {
+                "$set": roadmap_document,
+                "$inc": {"progress_version": 1},
+            },
         )
 
-    roadmap = _preserve_roadmap_progress(
-        roadmap,
-        existing_roadmap
+        if result.matched_count == 1:
+            return roadmap_document
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Roadmap changed concurrently. Please retry generation.",
     )
-
-    roadmap_document = {
-        "user_email": user_email,
-        "target_role": target_role,
-        "roadmap": roadmap
-    }
-
-    db.roadmaps.update_one(
-        {"user_email": user_email},
-        {"$set": roadmap_document},
-        upsert=True
-    )
-
-    return roadmap_document

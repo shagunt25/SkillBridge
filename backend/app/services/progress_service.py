@@ -1,3 +1,5 @@
+from typing import NoReturn
+
 from fastapi import HTTPException, status
 
 from app.database.mongodb import db
@@ -10,6 +12,7 @@ VALID_STATUSES = {
     "In Progress",
     "Completed",
 }
+MAX_PROGRESS_UPDATE_ATTEMPTS = 3
 
 
 def _normalise(value: str) -> str:
@@ -38,10 +41,42 @@ def _validate_status(new_status: str) -> None:
         )
 
 
-def _save_roadmap(user_email: str, roadmap: list[dict]) -> None:
-    roadmaps_collection.update_one(
-        {"user_email": user_email},
-        {"$set": {"roadmap": roadmap}},
+def _progress_version_filter(roadmap_doc: dict) -> dict:
+    if "progress_version" not in roadmap_doc:
+        return {"progress_version": {"$exists": False}}
+
+    version = roadmap_doc["progress_version"]
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Roadmap progress version is invalid.",
+        )
+
+    return {"progress_version": version}
+
+
+def _save_roadmap(
+    user_email: str,
+    roadmap_doc: dict,
+    roadmap: list[dict],
+) -> bool:
+    result = roadmaps_collection.update_one(
+        {
+            "user_email": user_email,
+            **_progress_version_filter(roadmap_doc),
+        },
+        {
+            "$set": {"roadmap": roadmap},
+            "$inc": {"progress_version": 1},
+        },
+    )
+    return result.matched_count == 1
+
+
+def _raise_concurrent_update_error() -> NoReturn:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Progress changed concurrently. Please retry the update.",
     )
 
 
@@ -52,36 +87,37 @@ def update_skill_progress(
 ) -> dict:
     _validate_status(new_status)
 
-    roadmap_doc = _get_roadmap_document(user_email)
-    roadmap = roadmap_doc.get("roadmap", [])
+    for _ in range(MAX_PROGRESS_UPDATE_ATTEMPTS):
+        roadmap_doc = _get_roadmap_document(user_email)
+        roadmap = roadmap_doc.get("roadmap", [])
 
-    selected_skill = next(
-        (
-            item
-            for item in roadmap
-            if _normalise(item.get("skill", "")) == _normalise(skill)
-        ),
-        None,
-    )
-
-    if selected_skill is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Skill '{skill}' not found in your roadmap.",
+        selected_skill = next(
+            (
+                item
+                for item in roadmap
+                if _normalise(item.get("skill", "")) == _normalise(skill)
+            ),
+            None,
         )
 
-    selected_skill["status"] = new_status
+        if selected_skill is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Skill '{skill}' not found in your roadmap.",
+            )
 
-    # Updating a whole skill also updates its subtopics.
-    for subtopic in selected_skill.get("subtopics", []):
-        subtopic["status"] = new_status
+        selected_skill["status"] = new_status
 
-    _save_roadmap(user_email, roadmap)
+        for subtopic in selected_skill.get("subtopics", []):
+            subtopic["status"] = new_status
 
-    return _build_progress_response(
-        roadmap_doc.get("target_role", ""),
-        roadmap,
-    )
+        if _save_roadmap(user_email, roadmap_doc, roadmap):
+            return _build_progress_response(
+                roadmap_doc.get("target_role", ""),
+                roadmap,
+            )
+
+    _raise_concurrent_update_error()
 
 
 def update_subtopic_progress(
@@ -92,62 +128,64 @@ def update_subtopic_progress(
 ) -> dict:
     _validate_status(new_status)
 
-    roadmap_doc = _get_roadmap_document(user_email)
-    roadmap = roadmap_doc.get("roadmap", [])
+    for _ in range(MAX_PROGRESS_UPDATE_ATTEMPTS):
+        roadmap_doc = _get_roadmap_document(user_email)
+        roadmap = roadmap_doc.get("roadmap", [])
 
-    selected_skill = next(
-        (
-            item
-            for item in roadmap
-            if _normalise(item.get("skill", "")) == _normalise(skill)
-        ),
-        None,
-    )
-
-    if selected_skill is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Skill '{skill}' not found in your roadmap.",
+        selected_skill = next(
+            (
+                item
+                for item in roadmap
+                if _normalise(item.get("skill", "")) == _normalise(skill)
+            ),
+            None,
         )
 
-    subtopics = selected_skill.get("subtopics", [])
+        if selected_skill is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Skill '{skill}' not found in your roadmap.",
+            )
 
-    selected_subtopic = next(
-        (
-            item
+        subtopics = selected_skill.get("subtopics", [])
+
+        selected_subtopic = next(
+            (
+                item
+                for item in subtopics
+                if _normalise(item.get("title", "")) == _normalise(subtopic)
+            ),
+            None,
+        )
+
+        if selected_subtopic is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Subtopic '{subtopic}' not found for skill '{skill}'.",
+            )
+
+        selected_subtopic["status"] = new_status
+
+        if subtopics and all(
+            item.get("status", "Not Started") == "Completed"
             for item in subtopics
-            if _normalise(item.get("title", "")) == _normalise(subtopic)
-        ),
-        None,
-    )
+        ):
+            selected_skill["status"] = "Completed"
+        elif any(
+            item.get("status", "Not Started") != "Not Started"
+            for item in subtopics
+        ):
+            selected_skill["status"] = "In Progress"
+        else:
+            selected_skill["status"] = "Not Started"
 
-    if selected_subtopic is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Subtopic '{subtopic}' not found for skill '{skill}'.",
-        )
+        if _save_roadmap(user_email, roadmap_doc, roadmap):
+            return _build_progress_response(
+                roadmap_doc.get("target_role", ""),
+                roadmap,
+            )
 
-    selected_subtopic["status"] = new_status
-
-    if subtopics and all(
-        item.get("status", "Not Started") == "Completed"
-        for item in subtopics
-    ):
-        selected_skill["status"] = "Completed"
-    elif any(
-        item.get("status", "Not Started") != "Not Started"
-        for item in subtopics
-    ):
-        selected_skill["status"] = "In Progress"
-    else:
-        selected_skill["status"] = "Not Started"
-
-    _save_roadmap(user_email, roadmap)
-
-    return _build_progress_response(
-        roadmap_doc.get("target_role", ""),
-        roadmap,
-    )
+    _raise_concurrent_update_error()
 
 
 def get_progress(user_email: str) -> dict:

@@ -115,6 +115,13 @@ JWTs include an `iat` (issued-at) claim. Whenever a password is changed â€”
 - Submitting a genuinely different target clears the existing roadmap and progress. Equivalent roles and skill sets are compared case-insensitively and preserve the roadmap.
 - `GET /analysis/skill-gap` — **requires login**. Compares the user's saved resume skills against their saved target skills using plain Python set logic (no AI involved — fast and deterministic). Requires both a resume and a target to already be saved, otherwise returns a 404 with a clear message. Returns matched, missing, and extra skills
 
+### Roadmap & Progress (`/roadmap/*`, `/progress/*`)
+- `POST /roadmap/generate` - generates or refreshes the authenticated user's learning roadmap.
+- `GET /progress` - retrieves the roadmap and completion percentage.
+- `PATCH /progress/update` - updates a skill and its subtopics.
+- `PATCH /progress/subtopic/update` - updates one subtopic and recalculates its skill status.
+- Progress writes are retried when another request changes the roadmap at the same time. If contention persists, the API returns `409 Conflict`; refresh the progress and retry.
+
 ## Important Notes
 
 - **Passwords are hashed** with Argon2 â€” never stored in plain text
