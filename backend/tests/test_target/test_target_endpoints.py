@@ -1,6 +1,10 @@
+import json
+
+import pytest
 from unittest.mock import patch, MagicMock
 import jwt
 from app.database.mongodb import db
+from app.services import auth_service
 from app.utils.security import JWT_SECRET, JWT_ALGORITHM
 
 def test_submit_career_goal(client, resume_token):
@@ -106,6 +110,153 @@ def test_target_markdown_stripping(client, resume_token):
         assert "aws" in response.json()["required_skills"]
 
 
+@pytest.mark.parametrize(
+    "ai_text",
+    [
+        "[]",
+        '{"target_role": "backend developer"}',
+        '{"target_role": "backend developer", "required_skills": "python"}',
+        '{"target_role": "backend developer", "required_skills": [12]}',
+        '{"target_role": "backend developer", "required_skills": []}',
+        '{"target_role": "   ", "required_skills": ["python"]}',
+        '{"target_role": "backend developer", "required_skills": ["python"], "extra": true}',
+    ],
+)
+def test_target_rejects_malformed_ai_payload(client, resume_token, ai_text):
+    mock_ai = MagicMock()
+    mock_ai.text = ai_text
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 502
+    assert "expected target skills format" in response.json()["detail"]
+
+
+def test_target_rejects_ai_skill_lists_over_limit(client, resume_token):
+    mock_ai = MagicMock()
+    mock_ai.text = json.dumps({
+        "target_role": "backend developer",
+        "required_skills": [f"skill-{index}" for index in range(51)],
+    })
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 502
+
+
+def test_target_rejects_oversized_ai_skill_name(client, resume_token):
+    mock_ai = MagicMock()
+    mock_ai.text = json.dumps({
+        "target_role": "backend developer",
+        "required_skills": ["python" * 17],
+    })
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 502
+
+
+def test_target_normalizes_and_deduplicates_ai_skills(client, resume_token):
+    mock_ai = MagicMock()
+    mock_ai.text = (
+        '{"target_role": " Backend Developer ", '
+        '"required_skills": [" Python ", "python", "REST APIs"]}'
+    )
+
+    with patch(
+        "app.services.target_service.client.models.generate_content",
+        return_value=mock_ai,
+    ):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "target_role": "Backend Developer",
+        "required_skills": ["python", "rest apis"],
+    }
+
+
+def test_target_without_gemini_configuration_returns_503(client, resume_token):
+    with patch("app.services.target_service.client", None):
+        response = client.post(
+            "/target/career",
+            json={"target_role": "Backend Developer"},
+        )
+
+    assert response.status_code == 503
+
+
+def test_ai_requests_are_limited_per_user(client, resume_token, monkeypatch):
+    monkeypatch.setattr(
+        auth_service,
+        "AI_RATE_LIMIT_USER_MAX_REQUESTS",
+        1,
+    )
+    auth_service.ai_rate_limits_collection.delete_many({})
+
+    try:
+        with patch(
+            "app.routes.target.get_skills_for_career",
+            return_value={
+                "target_role": "Backend Developer",
+                "required_skills": ["python"],
+            },
+        ) as generate, patch("app.routes.target.save_target"):
+            first = client.post(
+                "/api/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+            second = client.post(
+                "/api/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert second.headers["retry-after"].isdigit()
+        generate.assert_called_once()
+    finally:
+        auth_service.ai_rate_limits_collection.delete_many({})
+
+
+def test_target_requests_reject_whitespace_only_input(client, resume_token):
+    career_response = client.post(
+        "/target/career",
+        json={"target_role": "   "},
+    )
+    job_response = client.post(
+        "/target/job",
+        json={"job_description": " \n\t "},
+    )
+
+    assert career_response.status_code == 422
+    assert job_response.status_code == 422
+
+
 def test_target_database_persistence(client, resume_token):
     """Verifies the inferred skills are successfully saved to the MongoDB targets collection."""
     mock_ai = MagicMock()
@@ -160,6 +311,126 @@ def test_target_upsert_logic(client, resume_token):
     saved_targets = list(db.targets.find({"user_email": user_email}))
     assert len(saved_targets) == 1, "VULNERABILITY: Multiple targets found for one user instead of an upsert!"
     assert saved_targets[0]["target_role"] == "backend"
+
+
+def test_target_change_invalidates_old_roadmap_and_progress(client, resume_token):
+    token = next(
+        cookie.value
+        for cookie in client.cookies.jar
+        if cookie.name == "skillbridge_auth"
+    )
+    user_email = jwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+    )["sub"]
+
+    db.targets.delete_many({"user_email": user_email})
+    db.roadmaps.delete_many({"user_email": user_email})
+    db.targets.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "required_skills": ["Python", "FastAPI"],
+    })
+    db.roadmaps.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "roadmap": [
+            {"skill": "Python", "status": "Completed", "subtopics": []}
+        ],
+    })
+
+    try:
+        same_target_response = MagicMock()
+        same_target_response.text = (
+            '{"target_role": "backend developer", '
+            '"required_skills": ["python", "fastapi"]}'
+        )
+        with patch(
+            "app.services.target_service.client.models.generate_content",
+            return_value=same_target_response,
+        ):
+            same_target_result = client.post(
+                "/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+
+        assert same_target_result.status_code == 200
+        assert db.roadmaps.find_one({"user_email": user_email}) is not None
+
+        changed_target_response = MagicMock()
+        changed_target_response.text = (
+            '{"target_role": "Frontend Developer", '
+            '"required_skills": ["react", "typescript"]}'
+        )
+        with patch(
+            "app.services.target_service.client.models.generate_content",
+            return_value=changed_target_response,
+        ):
+            changed_target_result = client.post(
+                "/target/career",
+                json={"target_role": "Frontend Developer"},
+            )
+
+        assert changed_target_result.status_code == 200
+        assert db.roadmaps.find_one({"user_email": user_email}) is None
+
+        dashboard = client.get("/dashboard")
+        assert dashboard.status_code == 200
+        assert dashboard.json()["target_role"] == "Frontend Developer"
+        assert dashboard.json()["roadmap"] == []
+        assert client.get("/progress").status_code == 404
+    finally:
+        db.targets.delete_many({"user_email": user_email})
+        db.roadmaps.delete_many({"user_email": user_email})
+
+
+def test_equivalent_skill_alias_does_not_invalidate_roadmap(client, resume_token):
+    token = next(
+        cookie.value
+        for cookie in client.cookies.jar
+        if cookie.name == "skillbridge_auth"
+    )
+    user_email = jwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+    )["sub"]
+
+    db.targets.delete_many({"user_email": user_email})
+    db.roadmaps.delete_many({"user_email": user_email})
+    db.targets.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "required_skills": ["JavaScript", "REST APIs"],
+    })
+    db.roadmaps.insert_one({
+        "user_email": user_email,
+        "target_role": "Backend Developer",
+        "roadmap": [{"skill": "JavaScript", "status": "Completed"}],
+    })
+
+    mock_ai_response = MagicMock()
+    mock_ai_response.text = (
+        '{"target_role": "Backend Developer", '
+        '"required_skills": ["JS", "REST-APIs"]}'
+    )
+
+    try:
+        with patch(
+            "app.services.target_service.client.models.generate_content",
+            return_value=mock_ai_response,
+        ):
+            response = client.post(
+                "/target/career",
+                json={"target_role": "Backend Developer"},
+            )
+
+        assert response.status_code == 200
+        assert db.roadmaps.find_one({"user_email": user_email}) is not None
+    finally:
+        db.targets.delete_many({"user_email": user_email})
+        db.roadmaps.delete_many({"user_email": user_email})
 
 
 def test_target_job_description_too_large(client, resume_token):

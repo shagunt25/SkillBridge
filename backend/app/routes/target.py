@@ -12,6 +12,7 @@ from app.services.target_service import (
     get_skills_for_job_description,
     save_target,
 )
+from app.services.auth_service import reserve_ai_request
 from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/target", tags=["target"])
@@ -24,6 +25,7 @@ def submit_career_goal(
     payload: CareerGoalRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    reserve_ai_request(current_user["email"])
     result = get_skills_for_career(payload.target_role)
 
     try:
@@ -47,6 +49,7 @@ def submit_job_description(
     payload: JobDescriptionRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    reserve_ai_request(current_user["email"])
     result = get_skills_for_job_description(payload.job_description)
 
     try:

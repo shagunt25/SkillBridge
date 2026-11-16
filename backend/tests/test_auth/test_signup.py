@@ -1,5 +1,9 @@
-import pytest
 import uuid
+
+import pytest
+
+from app.database.mongodb import db
+from app.services import auth_service, otp_service
 
 TEST_USER = {
     "name": "Automated Tester",
@@ -7,18 +11,50 @@ TEST_USER = {
     "password": "StrictTestPassword99!"
 }
 
-# 1
 def test_signup_success(client):
-    response = client.post("/api/auth/signup", json=TEST_USER)
-    assert response.status_code in [200, 201]
-    data = response.json()
-    assert "email" in data
-    assert data["email"] == TEST_USER["email"]
+    payload = {**TEST_USER, "email": f"signup_{uuid.uuid4().hex}@example.com"}
+    try:
+        response = client.post("/api/auth/signup", json=payload)
+        assert response.status_code == 200
+        assert response.json()["email"] == payload["email"]
+    finally:
+        db.users.delete_one({"email": payload["email"]})
+        otp_service.otp_collection.delete_many({"email": payload["email"]})
 
-# 2
 def test_signup_duplicate_email(client):
-    response = client.post("/api/auth/signup", json=TEST_USER)
-    assert response.status_code == 409
+    payload = {**TEST_USER, "email": f"duplicate_{uuid.uuid4().hex}@example.com"}
+    try:
+        assert client.post("/api/auth/signup", json=payload).status_code == 200
+        response = client.post("/api/auth/signup", json=payload)
+        assert response.status_code == 409
+    finally:
+        db.users.delete_one({"email": payload["email"]})
+        otp_service.otp_collection.delete_many({"email": payload["email"]})
+        otp_service.otp_rate_limits_collection.delete_many({})
+
+
+def test_signup_duplicate_email_race_returns_conflict(client, monkeypatch):
+    email = f"race_{uuid.uuid4().hex[:8]}@example.com"
+    payload = {**TEST_USER, "email": email}
+    first_response = client.post("/api/auth/signup", json=payload)
+
+    assert first_response.status_code == 200
+
+    monkeypatch.setattr(
+        auth_service.users_collection,
+        "find_one",
+        lambda _query: None,
+    )
+    try:
+        duplicate_response = client.post("/api/auth/signup", json=payload)
+        assert duplicate_response.status_code == 409
+        assert duplicate_response.json()["detail"] == (
+            "An account with this email already exists."
+        )
+    finally:
+        db.users.delete_one({"email": email})
+        otp_service.otp_collection.delete_many({"email": email})
+        otp_service.otp_rate_limits_collection.delete_many({})
 
 # 3
 def test_signup_invalid_email_format(client):
@@ -49,13 +85,19 @@ def test_signup_password_too_short(client):
 def test_signup_duplicate_email_case_insensitive(client):
     """Test that signing up with an uppercase version of an existing email is blocked."""
     # Create a payload with the exact same email from TEST_USER, but capitalized
-    uppercase_user = TEST_USER.copy()
-    uppercase_user["email"] = uppercase_user["email"].upper()
-    
-    response = client.post("/api/auth/signup", json=uppercase_user)
-    
-    # The backend should recognize it as the same email and return 409 Conflict
-    assert response.status_code == 409
+    payload = {
+        **TEST_USER,
+        "email": f"case_{uuid.uuid4().hex}@example.com",
+    }
+    uppercase_user = {**payload, "email": payload["email"].upper()}
+    try:
+        assert client.post("/api/auth/signup", json=payload).status_code == 200
+        response = client.post("/api/auth/signup", json=uppercase_user)
+        assert response.status_code == 409
+    finally:
+        db.users.delete_one({"email": payload["email"]})
+        otp_service.otp_collection.delete_many({"email": payload["email"]})
+        otp_service.otp_rate_limits_collection.delete_many({})
 
 # 7 
 def test_signup_excessive_password_length(client):
@@ -67,10 +109,9 @@ def test_signup_excessive_password_length(client):
     }
     
     response = client.post("/api/auth/signup", json=bad_user)
-    
-    # Accepts 422/400 if a max length is enforced, or 200/201 if the backend accepts it
-    assert response.status_code in [400, 422, 200, 201]
-# 8
+    assert response.status_code == 422
+
+
 def test_signup_empty_password(client):
     """Test that a user cannot register an account with an empty password."""
     bad_user = TEST_USER.copy()
@@ -81,4 +122,4 @@ def test_signup_empty_password(client):
     response = client.post("/api/auth/signup", json=bad_user)
     
     # The API must reject this with a validation error (422) or bad request (400)
-    assert response.status_code in [400, 422]
+    assert response.status_code == 422

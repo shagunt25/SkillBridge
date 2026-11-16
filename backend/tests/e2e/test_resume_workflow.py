@@ -38,7 +38,7 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
             "password": test_password
         }
     )
-    assert signup_response.status_code in [200, 201], f"Signup Failed: {signup_response.text}"
+    assert signup_response.status_code == 200, f"Signup Failed: {signup_response.text}"
     
     # Bypass the OTP email verification step by manually activating the user in the database
     db.users.update_one({"email": test_email}, {"$set": {"email_verified": True}})
@@ -107,7 +107,7 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
     # PHASE G: AI Skill Prioritization (The Final Step)
     # ---------------------------------------------------------
     mock_prioritization_ai = MagicMock()
-    mock_prioritization_ai.text = '{"target_role": "backend engineer", "prioritized_skills": [{"skill": "kubernetes", "priority": "High"}, {"skill": "aws", "priority": "Medium"}]}'
+    mock_prioritization_ai.text = '{"target_role": "backend engineer", "prioritized_skills": [{"skill": "kubernetes", "score": 90}, {"skill": "aws", "score": 65}]}'
     
     # Intercept the specific AI call made by the gemini_service for prioritization
     with patch("app.services.gemini_service.client.models.generate_content", return_value=mock_prioritization_ai):
@@ -118,3 +118,89 @@ def test_full_user_registration_and_upload_journey(mock_generate, client, make_p
     prioritization_data = prioritization_response.json()
     assert prioritization_data["prioritized_skills"][0]["skill"] == "kubernetes"
     assert prioritization_data["prioritized_skills"][0]["priority"] == "High"
+
+    # ---------------------------------------------------------
+    # PHASE H: Roadmap Generation (AI & DB Linkage)
+    # ---------------------------------------------------------
+    # The user now has prioritized skills (Phase G). 
+    # We request the final AI roadmap and verify it saves to the database.
+    
+    mock_roadmap_ai_result = {
+        "target_role": "backend engineer", 
+        "roadmap": [
+            {
+                "skill": "kubernetes",
+                "priority": "High",
+                "priority_score": 90,
+                "priority_rank": 1,
+                "status": "Not Started",
+            },
+            {
+                "skill": "aws",
+                "priority": "Medium",
+                "priority_score": 65,
+                "priority_rank": 2,
+                "status": "Not Started",
+            }
+        ]
+    }
+    
+    # Keep roadmap generation deterministic; prioritization was covered in Phase G.
+    with patch(
+        "app.routes.roadmap.prioritize_missing_skills",
+        return_value=prioritization_data,
+    ) as mock_prioritize, patch(
+        "app.routes.roadmap.generate_roadmap",
+        return_value=mock_roadmap_ai_result,
+    ):
+        roadmap_response = client.post("/roadmap/generate")
+        
+    assert roadmap_response.status_code == 200, f"Roadmap Generation Failed: {roadmap_response.text}"
+    mock_prioritize.assert_called_once_with(
+        "Backend Engineer",
+        ["aws", "kubernetes"],
+    )
+    
+    # Verify the AI output was safely persisted in MongoDB
+    saved_roadmap = db.roadmaps.find_one({"user_email": test_email})
+    assert saved_roadmap is not None, "Roadmap was not linked to the user in MongoDB!"
+    assert len(saved_roadmap["roadmap"]) == 2
+
+    # ---------------------------------------------------------
+    # PHASE I: Progress Tracking 
+    # ---------------------------------------------------------
+    # The user starts working on their roadmap. We update 'aws' to 'In Progress'.
+    
+    progress_response = client.patch(
+        "/progress/update", 
+        json={"skill": "aws", "status": "Completed"}
+    )
+    assert progress_response.status_code == 200, f"Progress Update Failed: {progress_response.text}"
+    
+    progress_data = progress_response.json()
+    # The endpoint should return the updated roadmap and overall progress math
+    updated_aws_skill = next(item for item in progress_data["roadmap"] if item["skill"] == "aws")
+    
+    assert updated_aws_skill["status"] == "Completed"
+    
+    # Because one of the two skills is now complete, the progress should be strictly greater than 0.0
+    assert progress_data["overall_progress"] > 0.0
+
+    # ---------------------------------------------------------
+    # PHASE J: Dashboard Aggregation (The Grand Finale)
+    # ---------------------------------------------------------
+    # Finally, the user navigates to their dashboard to see their entire profile.
+    # This proves all separate collections (users, resumes, targets, roadmaps) merge successfully.
+    
+    dashboard_response = client.get("/dashboard")
+    assert dashboard_response.status_code == 200, f"Dashboard Retrieval Failed: {dashboard_response.text}"
+    
+    dashboard_data = dashboard_response.json()
+    assert dashboard_data["name"] == "E2E Test User"
+    assert dashboard_data["target_role"] == "Backend Engineer"
+    # Matches the math calculated in Phase I
+    assert dashboard_data["overall_progress"] == progress_data["overall_progress"]
+    
+    # E2E test user's resume had "Python" and "Docker" 
+    assert dashboard_data["current_skills"] == ["python", "docker"]
+

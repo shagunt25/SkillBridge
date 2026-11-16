@@ -1,6 +1,6 @@
 
 import os
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from app.schemas.auth import (
     SignupRequest,
@@ -17,6 +17,8 @@ from app.schemas.auth import (
 from app.services.auth_service import (
     create_user,
     authenticate_user,
+    release_login_attempt,
+    reserve_login_attempt,
     reset_password,
 )
 from app.services.otp_service import (
@@ -29,15 +31,18 @@ from app.services.otp_service import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = os.getenv("COOKIE_NAME", "skillbridge_auth")
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax")
+COOKIE_SECURE_VALUE = os.getenv("COOKIE_SECURE", "false").strip().lower()
+COOKIE_SECURE = COOKIE_SECURE_VALUE == "true"
+COOKIE_SECURE_VALUE_VALID = COOKIE_SECURE_VALUE in {"true", "false"}
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip().lower()
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", 60))
 
 
 @router.post("/signup", response_model=SignupResponse)
-def signup(payload: SignupRequest):
+def signup(payload: SignupRequest, request: Request):
     result = create_user(payload)
-    create_and_send_otp(payload.email)
+    client_ip = request.client.host if request.client else None
+    create_and_send_otp(payload.email, client_ip)
     return result
 
 
@@ -47,14 +52,35 @@ def verify_email(payload: VerifyEmailRequest):
 
 
 @router.post("/resend-verification-otp", response_model=MessageResponse)
-def resend_otp(payload: ResendOtpRequest):
-    return create_and_send_otp(payload.email)
+def resend_otp(payload: ResendOtpRequest, request: Request):
+    client_ip = request.client.host if request.client else None
+    return create_and_send_otp(
+        payload.email,
+        client_ip,
+        suppress_delivery_errors=True,
+    )
 
 
 @router.post("/login", response_model=MessageResponse)
-def login(payload: LoginRequest, response: Response):
-    token = authenticate_user(payload.email, payload.password)
+def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+):
+    client_ip = request.client.host if request.client else None
+    rate_limit_buckets = reserve_login_attempt(payload.email, client_ip)
 
+    try:
+        token = authenticate_user(payload.email, payload.password)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            release_login_attempt(rate_limit_buckets)
+        raise
+    except Exception:
+        release_login_attempt(rate_limit_buckets)
+        raise
+
+    release_login_attempt(rate_limit_buckets)
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
@@ -79,8 +105,9 @@ def logout(response: Response):
 
 
 @router.post("/forgot-password", response_model=MessageResponse)
-def forgot_password(payload: ForgotPasswordRequest):
-    return create_and_send_reset_otp(payload.email)
+def forgot_password(payload: ForgotPasswordRequest, request: Request):
+    client_ip = request.client.host if request.client else None
+    return create_and_send_reset_otp(payload.email, client_ip)
 
 
 @router.post("/verify-reset-otp", response_model=ResetTokenResponse)

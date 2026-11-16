@@ -1,7 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 import uuid
 import pytest
 from unittest.mock import patch
+from fastapi import HTTPException
 from app.database.mongodb import db
+from app.services import auth_service
+from app.services.otp_service import reset_tokens_collection, utc_now
 
 FIXED_RESET_OTP = "654321"
 OTP_GENERATE_PATH = "app.services.otp_service.generate_otp"
@@ -25,7 +30,14 @@ def active_user(client):
         {"$set": {"email_verified": True, "is_verified": True}}
     )
     
-    return {"email": email, "old_password": password}
+    yield {"email": email, "old_password": password}
+    client.cookies.clear()
+    db.users.delete_one({"email": email})
+    otp_collection.delete_many({"email": email})
+    reset_tokens_collection.delete_many({"email": email})
+    from app.services.otp_service import otp_rate_limits_collection
+
+    otp_rate_limits_collection.delete_many({})
 
 
 # 1. HAPPY PATH: Complete End-to-End Password Reset Flow
@@ -87,7 +99,58 @@ def test_reset_token_single_use(client, active_user):
         "reset_token": reset_token,
         "new_password": "HackerPassword99!"
     })
-    assert res_reset_2.status_code in [400, 401, 404]
+    assert res_reset_2.status_code == 400
+
+
+def test_concurrent_reset_token_use_succeeds_only_once(
+    client,
+    active_user,
+    monkeypatch,
+):
+    token = f"concurrent-{uuid.uuid4().hex}"
+    reset_tokens_collection.insert_one({
+        "reset_token": token,
+        "email": active_user["email"],
+        "expires_at": utc_now() + timedelta(minutes=10),
+        "used": False,
+    })
+
+    original_find_one = reset_tokens_collection.find_one
+    initial_reads_barrier = Barrier(2)
+    find_one_lock = Lock()
+    initial_reads = 0
+
+    def synchronized_find_one(*args, **kwargs):
+        nonlocal initial_reads
+        record = original_find_one(*args, **kwargs)
+        with find_one_lock:
+            initial_reads += 1
+            should_wait = initial_reads <= 2
+        if should_wait:
+            initial_reads_barrier.wait(timeout=5)
+        return record
+
+    monkeypatch.setattr(
+        reset_tokens_collection,
+        "find_one",
+        synchronized_find_one,
+    )
+
+    def reset_with_password(password):
+        try:
+            auth_service.reset_password(token, password)
+            return True
+        except HTTPException:
+            return False
+
+    passwords = ["FirstConcurrentPassword123!", "SecondConcurrentPassword123!"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reset_with_password, passwords))
+
+    assert results.count(True) == 1
+    assert reset_tokens_collection.find_one(
+        {"reset_token": token}
+    )["used"] is True
 
 
 # 3. SECURITY: User Enumeration Prevention on Forgot Password
@@ -96,6 +159,56 @@ def test_forgot_password_unregistered_email(client):
     response = client.post("/api/auth/forgot-password", json=payload)
     # Must return 200 so attackers cannot verify if an email exists
     assert response.status_code == 200
+    assert response.json() == {
+        "message": "If an account exists, a password reset OTP has been sent."
+    }
+
+
+def test_forgot_password_response_does_not_reveal_cooldown_or_delivery_failure(
+    client,
+    active_user,
+):
+    email = active_user["email"]
+
+    unknown_response = client.post(
+        "/api/auth/forgot-password",
+        json={"email": f"unknown_{uuid.uuid4().hex}@example.com"},
+    )
+    with patch(OTP_GENERATE_PATH, return_value=FIXED_RESET_OTP):
+        first_request = client.post(
+            "/api/auth/forgot-password",
+            json={"email": email},
+        )
+        cooldown_response = client.post(
+            "/api/auth/forgot-password",
+            json={"email": email},
+        )
+
+    assert first_request.status_code == 200
+    assert cooldown_response.status_code == 200
+    assert unknown_response.json() == cooldown_response.json()
+
+    failure_email = f"delivery-failure_{uuid.uuid4().hex}@example.com"
+    db.users.insert_one({
+        "email": failure_email,
+        "email_verified": True,
+        "password_hash": "unused",
+    })
+    with patch(
+        "app.services.otp_service._send_otp_email",
+        side_effect=HTTPException(
+            status_code=503,
+            detail="SMTP settings are incomplete.",
+        ),
+    ):
+        delivery_failure_response = client.post(
+            "/api/auth/forgot-password",
+            json={"email": failure_email},
+        )
+
+    assert delivery_failure_response.status_code == 200
+    assert delivery_failure_response.json() == unknown_response.json()
+    db.users.delete_one({"email": failure_email})
 
 
 # 4. EDGE CASE: Invalid Email Format
@@ -112,7 +225,7 @@ def test_verify_reset_otp_invalid(client, active_user):
         "otp": "000000"
     }
     response = client.post("/api/auth/verify-reset-otp", json=payload)
-    assert response.status_code in [400, 401, 404]
+    assert response.status_code == 400
 
 
 # 6. FAILURE CASE: Short Password on Reset
@@ -132,9 +245,9 @@ def test_reset_password_invalid_token(client):
         "new_password": "ValidPassword123!"
     }
     response = client.post("/api/auth/reset-password", json=payload)
-    assert response.status_code in [400, 401, 404]
+    assert response.status_code == 400
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.services.otp_service import otp_collection
 
 # 8. EDGE CASE: Expired Reset OTP
@@ -146,14 +259,21 @@ def test_verify_reset_otp_expired(client, active_user):
     with patch(OTP_GENERATE_PATH, return_value=FIXED_RESET_OTP):
         client.post("/api/auth/forgot-password", json={"email": email})
         
-    # Backdate the OTP in the database (ensure the purpose matches your DB, usually 'password_reset')
+    # Backdate the OTP so this test isolates expiration handling.
     otp_collection.update_one(
         {"email": email, "purpose": "password_reset"}, 
-        {"$set": {"expires_at": datetime.utcnow() - timedelta(minutes=10)}}
+        {
+            "$set": {
+                "expires_at": (
+                    datetime.now(timezone.utc).replace(tzinfo=None)
+                    - timedelta(minutes=10)
+                )
+            }
+        }
     )
     
     response = client.post("/api/auth/verify-reset-otp", json={"email": email, "otp": FIXED_RESET_OTP})
-    assert response.status_code in [400, 401]
+    assert response.status_code == 400
 
 
 # 9. SECURITY: Max Attempts on Reset OTP (Brute-Force Lockout)
@@ -171,29 +291,67 @@ def test_verify_reset_otp_max_attempts(client, active_user):
         
     # Attempt 6 with the correct OTP must fail
     response = client.post("/api/auth/verify-reset-otp", json={"email": email, "otp": FIXED_RESET_OTP})
-    assert response.status_code in [400, 401, 429]
+    assert response.status_code == 400
 
 # 10. EDGE CASE: Reset Token Expiration
 def test_reset_password_expired_token(client):
-    # Verifies that an expired reset_token is rejected.
+    token = f"expired-{uuid.uuid4().hex}"
+    expiry = utc_now() + timedelta(minutes=1)
+    reset_tokens_collection.insert_one({
+        "reset_token": token,
+        "email": f"expired_{uuid.uuid4().hex}@example.com",
+        "expires_at": expiry,
+        "used": False,
+    })
     payload = {
-        "reset_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE1MTYyMzkwMjJ9.expired_signature_mock",
+        "reset_token": token,
         "new_password": "ValidPassword123!"
     }
-    response = client.post("/api/auth/reset-password", json=payload)
-    assert response.status_code in [400, 401]
+    try:
+        with patch(
+            "app.services.otp_service.utc_now",
+            return_value=expiry + timedelta(seconds=1),
+        ):
+            response = client.post("/api/auth/reset-password", json=payload)
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "Reset token expired. Please start over."
+        )
+    finally:
+        reset_tokens_collection.delete_one({"reset_token": token})
 
 
 # 11. SECURITY: Rate Limiting on Forgot Password
-def test_forgot_password_rate_limiting(client, active_user):
-    """Verifies that spamming the forgot-password endpoint is throttled."""
+def test_forgot_password_rate_limiting(client, active_user, monkeypatch):
+    """The per-email quota prevents extra reset-email deliveries."""
     email = active_user["email"]
-    
-    # Spam the endpoint 5+ times
-    for _ in range(5):
-        client.post("/api/auth/forgot-password", json={"email": email})
-        
-    # The 6th attempt should hit the rate limiter
-    response = client.post("/api/auth/forgot-password", json={"email": email})
-    assert response.status_code in [429, 200]  # Accepting 200 if rate-limiting isn't implemented yet
+    from app.services import otp_service
+
+    monkeypatch.setattr(otp_service, "OTP_RATE_LIMIT_IP_MAX_REQUESTS", 100)
+    monkeypatch.setattr(otp_service, "OTP_RATE_LIMIT_EMAIL_MAX_REQUESTS", 2)
+    monkeypatch.setattr(
+        otp_service,
+        "_claim_otp_cooldown",
+        lambda *_args: otp_service.utc_now() + timedelta(seconds=30),
+    )
+    otp_service.otp_rate_limits_collection.delete_many({})
+
+    try:
+        with patch("app.services.otp_service._send_otp_email") as send_email:
+            responses = [
+                client.post(
+                    "/api/auth/forgot-password",
+                    json={"email": email},
+                )
+                for _ in range(3)
+            ]
+
+        assert [response.status_code for response in responses] == [
+            200,
+            200,
+            200,
+        ]
+        assert send_email.call_count == 2
+    finally:
+        otp_service.otp_rate_limits_collection.delete_many({})
 

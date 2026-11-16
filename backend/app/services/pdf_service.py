@@ -3,6 +3,8 @@ import pymupdf as fitz
 
 MAX_FILE_SIZE_MB = 5
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_PDF_PAGES = 20
+MAX_EXTRACTED_TEXT_CHARACTERS = 50_000
 ALLOWED_CONTENT_TYPE = "application/pdf"
 
 
@@ -11,6 +13,12 @@ async def validate_and_read_pdf(file: UploadFile) -> bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only PDF files are allowed."
+        )
+
+    if file.size is not None and file.size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File too large. Maximum allowed is {MAX_FILE_SIZE_MB}MB."
         )
 
     # Read at most 1 byte over the limit to avoid loading a huge upload.
@@ -40,7 +48,29 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                     detail="This PDF is password-protected. Please upload an unencrypted PDF."
                 )
 
-            pages_text = [page.get_text() for page in doc]
+            if doc.page_count > MAX_PDF_PAGES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"PDF has too many pages. Maximum allowed is {MAX_PDF_PAGES}."
+                )
+
+            pages_text = []
+            extracted_characters = 0
+            for page in doc:
+                page_text = page.get_text()
+                extracted_characters += len(page_text) + (
+                    1 if pages_text else 0
+                )
+                if extracted_characters > MAX_EXTRACTED_TEXT_CHARACTERS:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            "Extracted text is too long. Maximum allowed is "
+                            f"{MAX_EXTRACTED_TEXT_CHARACTERS} characters."
+                        )
+                    )
+                pages_text.append(page_text)
+
             text = "\n".join(pages_text)
 
     except HTTPException:

@@ -1,11 +1,14 @@
+import asyncio
 import io
 import jwt
 import json
 import pytest
+import pymupdf as fitz
 from unittest.mock import patch
 from app.utils.dependencies import get_current_user
 from app.database.mongodb import db
 from app.utils.security import JWT_SECRET, JWT_ALGORITHM
+from app.services import pdf_service
 
 GEMINI_MOCK_PATH = "app.services.gemini_service.generate_resume_content"
 
@@ -22,7 +25,7 @@ class MockResponse:
 
 @patch(GEMINI_MOCK_PATH)
 def test_upload_resume_success(mock_generate, client, resume_token, make_pdf):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     mock_generate.return_value = MockResponse()
     
     valid_pdf = make_pdf("Shagun Tiwari\nB.Tech CSE\nSkills: Python, Docker, FastAPI")
@@ -44,7 +47,7 @@ def test_upload_resume_no_token(client, make_pdf):
     assert response.status_code == 401
 
 def test_upload_resume_invalid_file_type(client, resume_token):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     mock_txt = io.BytesIO(b"This is a plain text file, not a resume.")
     files = {"file": ("hacker_script.txt", mock_txt, "text/plain")}
     
@@ -52,12 +55,12 @@ def test_upload_resume_invalid_file_type(client, resume_token):
     assert response.status_code == 400
 
 def test_upload_resume_missing_file(client, resume_token):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     response = client.post("/api/resume/upload", headers=headers)
     assert response.status_code == 422
 
 def test_upload_resume_empty_file(client, resume_token):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     empty_file = io.BytesIO(b"")
     files = {"file": ("empty.pdf", empty_file, "application/pdf")}
     
@@ -65,7 +68,7 @@ def test_upload_resume_empty_file(client, resume_token):
     assert response.status_code == 400
 
 def test_upload_resume_corrupted_pdf(client, resume_token):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     corrupted_pdf = io.BytesIO(b"This is not a real PDF structure, just garbage bytes.")
     files = {"file": ("corrupted.pdf", corrupted_pdf, "application/pdf")}
     
@@ -73,7 +76,7 @@ def test_upload_resume_corrupted_pdf(client, resume_token):
     assert response.status_code == 400
 
 def test_upload_resume_mime_spoofing(client, resume_token):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     malicious_script = io.BytesIO(b"#!/bin/bash\necho 'Hacked'")
     files = {"file": ("fake_resume.pdf", malicious_script, "application/pdf")}
     
@@ -82,7 +85,7 @@ def test_upload_resume_mime_spoofing(client, resume_token):
 
 @patch(GEMINI_MOCK_PATH)
 def test_upload_resume_minimal_text(mock_generate, client, resume_token, make_pdf):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     mock_generate.return_value = MockResponse(json.dumps({
         "skills": [], "education": [], "experience": [], "projects": []
     }))
@@ -97,7 +100,7 @@ def test_upload_resume_minimal_text(mock_generate, client, resume_token, make_pd
 @patch(GEMINI_MOCK_PATH)
 def test_upload_resume_complex_unicode(mock_generate, client, resume_token, make_pdf):
     """Tests a real PDF containing non-ASCII characters and symbols."""
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     mock_generate.return_value = MockResponse()
     
     unicode_pdf = make_pdf("Résumé — Shagun Tiwari • C++ / Python © 2026 ✓")
@@ -109,7 +112,7 @@ def test_upload_resume_complex_unicode(mock_generate, client, resume_token, make
 @patch(GEMINI_MOCK_PATH)
 def test_upload_resume_prompt_injection(mock_generate, client, resume_token, make_pdf):
     """Verifies that prompt text is passed to EXTRACTION_PROMPT and validated against schema."""
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     # Simulate an attacker hijacking the LLM output; Pydantic must block it with a 502
     mock_generate.return_value = MockResponse('{"hacked": true}')
     
@@ -121,7 +124,7 @@ def test_upload_resume_prompt_injection(mock_generate, client, resume_token, mak
 
 def test_upload_resume_password_protected(client, resume_token, make_pdf):
     """Tests an AES-256 encrypted PDF generated in memory."""
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     encrypted_pdf = make_pdf("Secret Resume Content", encrypt=True)
     files = {"file": ("encrypted.pdf", encrypted_pdf, "application/pdf")}
     
@@ -131,7 +134,7 @@ def test_upload_resume_password_protected(client, resume_token, make_pdf):
 
 def test_upload_resume_image_only(client, resume_token, make_pdf):
     """Tests a valid PDF with 0 extractable text (simulating a scanned image PDF)."""
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     blank_pdf = make_pdf("")  # Creates a valid 1-page PDF with no text layer
     files = {"file": ("scanned.pdf", blank_pdf, "application/pdf")}
     
@@ -139,13 +142,102 @@ def test_upload_resume_image_only(client, resume_token, make_pdf):
     assert response.status_code == 400
 
 def test_upload_resume_file_too_large(client, resume_token):
-    headers = {"Authorization": f"Bearer {resume_token}"}
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
     massive_pdf = io.BytesIO(b"%PDF-1.4\n" + b"A" * (15 * 1024 * 1024) + b"\n%%EOF")
     files = {"file": ("massive.pdf", massive_pdf, "application/pdf")}
     
     response = client.post("/api/resume/upload", headers=headers, files=files)
     # Locked strictly to your current backend's 400 response
     assert response.status_code == 400
+
+
+def test_upload_resume_too_many_pages(client, resume_token, monkeypatch):
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
+    monkeypatch.setattr(pdf_service, "MAX_PDF_PAGES", 1)
+
+    document = fitz.open()
+    for page_number in range(2):
+        page = document.new_page()
+        page.insert_text((72, 72), f"Resume page {page_number + 1}")
+    pdf_bytes = io.BytesIO(document.tobytes())
+    document.close()
+
+    files = {"file": ("long_resume.pdf", pdf_bytes, "application/pdf")}
+    response = client.post("/api/resume/upload", headers=headers, files=files)
+
+    assert response.status_code == 400
+    assert "too many pages" in response.json()["detail"].lower()
+
+
+def test_upload_resume_extracted_text_too_large(
+    client,
+    resume_token,
+    make_pdf,
+    monkeypatch,
+):
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
+    monkeypatch.setattr(
+        pdf_service,
+        "MAX_EXTRACTED_TEXT_CHARACTERS",
+        20,
+    )
+    pdf = make_pdf("This resume text exceeds the test limit.")
+    files = {"file": ("long_text_resume.pdf", pdf, "application/pdf")}
+
+    with patch("app.routes.resume.analyze_resume_text") as mock_analyze:
+        response = client.post(
+            "/api/resume/upload",
+            headers=headers,
+            files=files,
+        )
+
+    assert response.status_code == 400
+    assert "text is too long" in response.json()["detail"].lower()
+    mock_analyze.assert_not_called()
+
+
+def test_upload_resume_offloads_blocking_work(
+    client,
+    resume_token,
+    make_pdf,
+):
+    headers = {"Cookie": f"skillbridge_auth={resume_token}"}
+
+    def assert_running_off_event_loop():
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+
+    def extract_text(_file_bytes):
+        assert_running_off_event_loop()
+        return "Resume text"
+
+    def analyze_resume(_text):
+        assert_running_off_event_loop()
+        return json.loads(VALID_MOCK_AI_JSON)
+
+    def save_resume(_user_email, _analysis):
+        assert_running_off_event_loop()
+
+    pdf = make_pdf("Resume text")
+    files = {"file": ("resume.pdf", pdf, "application/pdf")}
+    with patch(
+        "app.routes.resume.extract_text_from_pdf",
+        side_effect=extract_text,
+    ), patch(
+        "app.routes.resume.analyze_resume_text",
+        side_effect=analyze_resume,
+    ), patch(
+        "app.routes.resume.save_resume_analysis",
+        side_effect=save_resume,
+    ):
+        response = client.post(
+            "/api/resume/upload",
+            headers=headers,
+            files=files,
+        )
+
+    assert response.status_code == 200
+
 
 @patch(GEMINI_MOCK_PATH)
 def test_upload_resume_database_persistence_strict(mock_generate, client, make_pdf):
@@ -185,7 +277,13 @@ def test_upload_resume_database_persistence_strict(mock_generate, client, make_p
     
 @patch("app.services.resume_service.resumes_collection.update_one")
 @patch(GEMINI_MOCK_PATH)
-def test_upload_resume_database_outage(mock_generate, mock_db_update, client, make_pdf):
+def test_upload_resume_database_outage(
+    mock_generate,
+    mock_db_update,
+    client,
+    make_pdf,
+    caplog,
+):
     """Verifies the API handles a sudden MongoDB connection failure gracefully."""
     # 1. Override auth to ensure we reach the database logic
     strict_test_email = "db_outage_user@example.com"
@@ -206,6 +304,9 @@ def test_upload_resume_database_outage(mock_generate, mock_db_update, client, ma
         # 4. Assert backend doesn't crash the worker, but returns a clean 500 error
         assert response.status_code == 500
         assert "internal server error" in response.json()["detail"].lower() or "error" in response.json()["detail"].lower()
+        assert "Failed to save analyzed resume" in caplog.text
+        assert "MongoDB connection lost" in caplog.text
+        assert "MongoDB connection lost" not in response.json()["detail"]
     
     finally:
         client.app.dependency_overrides.pop(get_current_user, None)
